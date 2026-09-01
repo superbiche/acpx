@@ -1,10 +1,11 @@
 # acpx 🤝 — Agents talking to agents, minus the terminal séance
 
 > [!IMPORTANT]
-> `@superbiche/acpx@0.13.2-fork.1` is a temporary fork release adding repeatable
-> per-invocation ACP session config options to `exec`. Install it with
-> `npm install -g @superbiche/acpx@0.13.2-fork.1` while
-> [upstream PR #533](https://github.com/openclaw/acpx/pull/533) is pending.
+> `@superbiche/acpx@0.13.2-fork.2` is a temporary fork release adding repeatable
+> per-invocation ACP session config options to `exec` and preserving ACP prompt
+> response metadata end to end. Install it with
+> `npm install -g @superbiche/acpx@0.13.2-fork.2` while the upstream changes,
+> including [PR #533](https://github.com/openclaw/acpx/pull/533), are pending.
 
 <p align="center">
   <img src="acpx_banner.svg" alt="acpx banner" width="100%" />
