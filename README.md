@@ -1,5 +1,10 @@
 # acpx 🤝 — Agents talking to agents, minus the terminal séance
 
+> [!IMPORTANT]
+> `@superbiche/acpx@0.13.2-fork.1` is a temporary fork release adding repeatable
+> per-invocation ACP session config options to `exec`. Install it with
+> `npm install -g @superbiche/acpx@0.13.2-fork.1` while the upstream change is pending.
+
 <p align="center">
   <img src="acpx_banner.svg" alt="acpx banner" width="100%" />
 </p>

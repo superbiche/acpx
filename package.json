@@ -1,6 +1,6 @@
 {
-  "name": "acpx",
-  "version": "0.13.2",
+  "name": "@superbiche/acpx",
+  "version": "0.13.2-fork.1",
   "description": "Headless CLI client for the Agent Client Protocol (ACP) — talk to coding agents from the command line",
   "keywords": [
     "acp",
@@ -15,7 +15,7 @@
   "author": "OpenClaw Team <dev@openclaw.ai>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openclaw/acpx"
+    "url": "git+https://github.com/superbiche/acpx.git"
   },
   "bin": {
     "acpx": "dist/cli.js"
