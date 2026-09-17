@@ -1,5 +1,9 @@
 # acpx 🤝 — Agents talking to agents, minus the terminal séance
 
+> [!IMPORTANT]
+> This is the temporary `@superbiche/acpx` distribution. See [FORK.md](FORK.md)
+> for the upstream base, pending patch, exact installation command and retirement condition.
+
 <p align="center">
   <img src="acpx_banner.svg" alt="acpx banner" width="100%" />
 </p>

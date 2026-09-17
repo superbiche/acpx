@@ -236,7 +236,10 @@ export class SharedAcpRuntime {
         requireSharedRuntime: true,
         signal: this.disconnect.signal,
         timeoutMs: input.timeoutMs ?? this.options.timeoutMs,
-        queueOwnerArgs: [fileURLToPath(import.meta.resolve("acpx/dist/cli.js")), "__queue-owner"],
+        queueOwnerArgs: [
+          fileURLToPath(import.meta.resolve("@superbiche/acpx/dist/cli.js")),
+          "__queue-owner",
+        ],
         onQueueAccepted: () => {
           accepted = true;
           if (cancelRequested) {

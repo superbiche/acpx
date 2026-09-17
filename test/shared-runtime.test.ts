@@ -21,7 +21,7 @@ import { extractAgentMessageChunkText } from "./jsonrpc-test-helpers.js";
 import { withTempHome } from "./runtime-test-helpers.js";
 
 const run = promisify(execFile);
-const CLI = fileURLToPath(import.meta.resolve("acpx/dist/cli.js"));
+const CLI = fileURLToPath(import.meta.resolve("@superbiche/acpx/dist/cli.js"));
 const AGENT = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 
 async function withSharedSession(
