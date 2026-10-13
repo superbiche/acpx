@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { makeSessionRecord } from "./runtime-test-helpers.js";
 
 // The normal test command builds dist before compiling/running test files.
-const runtimeUrl = import.meta.resolve("acpx/runtime");
+const runtimeUrl = import.meta.resolve("@superbiche/acpx/runtime");
 const mockAgentPath = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 
 const childProgram = String.raw`
@@ -151,7 +151,7 @@ test(
   { timeout: 30_000 },
   async (t) => {
     const { createAcpRuntime, createAgentRegistry, createFileSessionStore } =
-      await import("acpx/runtime");
+      await import("@superbiche/acpx/runtime");
     const directory = mkdtempSync(path.join(os.tmpdir(), "acpx-deferred-control-"));
     let launches = 0;
     const runtime = createAcpRuntime({
