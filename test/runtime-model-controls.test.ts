@@ -10,15 +10,16 @@ import {
   createFileSessionStore,
   isRequestedModelUnsupportedError,
 } from "../src/runtime.js";
+import { writeClaudeEgressSettings } from "./claude-egress-test-helpers.js";
 
-// Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json.
+// Built-in Claude sessions without user settings require ~/.acpx/claude-settings.json
+// to hold the egress hook contract.
 const originalHome = process.env.HOME;
 let scratchHome = "";
 
 before(async () => {
   scratchHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-model-controls-home-"));
-  await fs.mkdir(path.join(scratchHome, ".acpx"));
-  await fs.writeFile(path.join(scratchHome, ".acpx", "claude-settings.json"), "{}");
+  await writeClaudeEgressSettings(scratchHome);
   process.env.HOME = scratchHome;
 });
 

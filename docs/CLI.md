@@ -740,8 +740,10 @@ sessions.
 
 Without user settings, built-in `claude` sessions pass
 `~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to
-start when that file is missing, unreadable, or not a JSON object. The file is
-not read when `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`.
+start unless that file holds exactly Liaison's egress hook contract with
+executable commands. With `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not
+read and the user settings must carry the contract hooks instead. Either way,
+managed, project, or local settings that turn hooks off refuse the session.
 
 `ACPX_PERF_METRICS_FILE` enables optional NDJSON performance capture, including
 command arguments. On POSIX, capture files use `0600`; existing parent directory

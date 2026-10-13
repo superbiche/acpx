@@ -1,9 +1,15 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeSettingsUnavailableError, CopilotAcpUnsupportedError } from "../errors.js";
 import { readWindowsEnvValue, resolveWindowsExecutablePath } from "../spawn-command-options.js";
 import { type AcpClientOptions } from "../types.js";
+import {
+  claudeDisablingKeys,
+  claudeEgressContractViolations,
+  type CommandCheck,
+  isExecutableFile,
+} from "./claude-egress-contract.js";
 import { basenameToken, splitCommandLine } from "./client-process.js";
 
 const DEFAULT_AGENT_CLOSE_AFTER_STDIN_END_MS = 100;
@@ -263,14 +269,24 @@ export async function ensureCopilotAcpSupport(
   }
 }
 
+// Where a Claude session's settings come from. Defaults: the process environment,
+// the user's home, no project directory, the platform's managed-settings directory.
+export type ClaudeSettingsContext = {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  cwd?: string;
+  managedDir?: string;
+  isUsable?: CommandCheck;
+};
+
 export function buildClaudeCodeOptionsMeta(
   options: AcpClientOptions["sessionOptions"],
   isolateUserSettings = false,
-  loadSettings: () => Record<string, unknown> = loadClaudeCodeSettingsFile,
+  context: ClaudeSettingsContext = {},
 ): Record<string, unknown> | undefined {
   const claudeCodeOptions: Record<string, unknown> = {};
   if (isolateUserSettings) {
-    assignClaudeCodeSettingIsolation(claudeCodeOptions, loadSettings);
+    assignClaudeCodeSettingIsolation(claudeCodeOptions, context);
   }
   if (options) {
     assignClaudeCodeOptions(claudeCodeOptions, options);
@@ -290,53 +306,140 @@ export function buildClaudeCodeOptionsMeta(
   return meta;
 }
 
-// Isolated sessions still need the settings every session must carry (such as
-// required hooks): they come from a dedicated file, never from the user
-// settings. When user settings are included, those already carry them.
+// Every built-in Claude session must run the egress hooks of the declared contract
+// (src/acp/claude-egress-contract.ts). Isolated sessions get them from a dedicated
+// file, never from the user settings; sessions that include user settings must find
+// them there. No loaded settings source may disable hooks. Any failure refuses the
+// session before a request is sent.
 function assignClaudeCodeSettingIsolation(
   target: Record<string, unknown>,
-  loadSettings: () => Record<string, unknown>,
+  context: ClaudeSettingsContext,
 ): void {
-  const settingSources = resolveClaudeCodeSettingSources();
+  const settingSources = resolveClaudeCodeSettingSources(context.env);
   target.settingSources = settingSources;
-  if (!settingSources.includes("user")) {
-    target.settings = loadSettings();
+  if (settingSources.includes("user")) {
+    requireClaudeUserSettingsHooks(context);
+  } else {
+    target.settings = loadClaudeCodeSettingsFile(
+      claudeCodeSettingsFilePath(context.home),
+      context.isUsable,
+    );
   }
+  assertClaudeHooksNotDisabled(claudeOtherSettingsFiles(context));
 }
 
 export function claudeCodeSettingsFilePath(home: string = os.homedir()): string {
   return path.join(home, ".acpx", "claude-settings.json");
 }
 
-// Fail closed: a missing, unreadable or invalid file refuses the session
-// rather than starting one without the settings it must carry.
-export function loadClaudeCodeSettingsFile(
-  filePath: string = claudeCodeSettingsFilePath(),
-): Record<string, unknown> {
+export function claudeUserSettingsFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): string {
+  const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+  return path.join(configDir ? configDir : path.join(home, ".claude"), "settings.json");
+}
+
+export function claudeManagedSettingsDir(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "darwin") {
+    return "/Library/Application Support/ClaudeCode";
+  }
+  return platform === "win32" ? "C:\\Program Files\\ClaudeCode" : "/etc/claude-code";
+}
+
+function refuse(message: string, cause?: unknown): ClaudeSettingsUnavailableError {
+  return new ClaudeSettingsUnavailableError(`${message}; refusing to start the session.`, {
+    cause,
+  });
+}
+
+function readSettingsJson(filePath: string, label: string): unknown {
   let text: string;
   try {
     text = readFileSync(filePath, "utf8");
   } catch (error) {
-    throw new ClaudeSettingsUnavailableError(
-      `Claude settings file is missing or unreadable: ${filePath}. Built-in claude sessions without user settings require it; refusing to start the session.`,
-      { cause: error },
-    );
+    throw refuse(`${label} is missing or unreadable: ${filePath}`, error);
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text) as unknown;
   } catch (error) {
-    throw new ClaudeSettingsUnavailableError(
-      `Claude settings file is not valid JSON: ${filePath}; refusing to start the session.`,
-      { cause: error },
-    );
+    throw refuse(`${label} is not valid JSON: ${filePath}`, error);
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ClaudeSettingsUnavailableError(
-      `Claude settings file must hold a JSON object: ${filePath}; refusing to start the session.`,
+}
+
+// Fail closed: a missing, unreadable or invalid file, or one that does not hold
+// exactly the egress hook contract with usable commands, refuses the session.
+export function loadClaudeCodeSettingsFile(
+  filePath: string = claudeCodeSettingsFilePath(),
+  isUsable: CommandCheck = isExecutableFile,
+): Record<string, unknown> {
+  const parsed = readSettingsJson(filePath, "Claude settings file");
+  const problems = claudeEgressContractViolations(parsed, true, isUsable);
+  if (problems.length > 0) {
+    throw refuse(
+      `Claude settings file does not hold the egress hook contract: ${filePath}: ${problems.join("; ")}. Built-in claude sessions without user settings require it; render it with \`liaison egress link --apply\``,
     );
   }
   return parsed as Record<string, unknown>;
+}
+
+function requireClaudeUserSettingsHooks(context: ClaudeSettingsContext): void {
+  const filePath = claudeUserSettingsFilePath(context.env, context.home);
+  const label = "Claude user settings (ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1)";
+  const problems = claudeEgressContractViolations(
+    readSettingsJson(filePath, label),
+    false,
+    context.isUsable,
+  );
+  if (problems.length > 0) {
+    throw refuse(
+      `${label} do not carry the egress hook contract: ${filePath}: ${problems.join("; ")}`,
+    );
+  }
+}
+
+// Project, local and managed settings also load; any of them may disable hooks.
+function claudeOtherSettingsFiles(context: ClaudeSettingsContext): string[] {
+  const managedDir = context.managedDir ?? claudeManagedSettingsDir();
+  const files = [path.join(managedDir, "managed-settings.json")];
+  try {
+    const dropIns = path.join(managedDir, "managed-settings.d");
+    for (const name of readdirSync(dropIns).toSorted()) {
+      if (name.endsWith(".json")) {
+        files.push(path.join(dropIns, name));
+      }
+    }
+  } catch {
+    // no drop-in directory
+  }
+  if (context.cwd) {
+    files.push(path.join(context.cwd, ".claude", "settings.json"));
+    files.push(path.join(context.cwd, ".claude", "settings.local.json"));
+  }
+  return files;
+}
+
+function readOptionalSettings(filePath: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, "utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined; // absent or invalid: Claude Code does not apply it either
+  }
+}
+
+function assertClaudeHooksNotDisabled(files: string[]): void {
+  for (const filePath of files) {
+    const settings = readOptionalSettings(filePath);
+    const disabling = settings ? claudeDisablingKeys(settings) : [];
+    if (disabling.length > 0) {
+      throw refuse(
+        `${filePath} sets ${disabling.join(", ")}, which turns the required egress hooks off`,
+      );
+    }
+  }
 }
 
 export function resolveClaudeCodeSettingSources(env: NodeJS.ProcessEnv = process.env): string[] {

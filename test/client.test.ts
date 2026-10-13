@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
+import { mkdtempSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,9 +18,16 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import {
+  buildClaudeCodeOptionsMeta,
   claudeCodeSettingsFilePath,
+  claudeUserSettingsFilePath,
   loadClaudeCodeSettingsFile,
 } from "../src/acp/agent-command.js";
+import {
+  CLAUDE_EGRESS_CONTRACT,
+  CLAUDE_EGRESS_CONTRACT_DIGEST,
+  claudeEgressContractViolations,
+} from "../src/acp/claude-egress-contract.js";
 import {
   AcpClient,
   buildAgentSpawnOptions,
@@ -41,23 +50,18 @@ import {
 import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
 import { createSessionConversation } from "../src/session/conversation-model.js";
 import type { AcpProcessStarted } from "../src/types.js";
+import { claudeEgressSettings, writeClaudeEgressSettings } from "./claude-egress-test-helpers.js";
 import { withMockedReadline, withTtyState } from "./tty-test-helpers.js";
 
-// Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json;
-// every test in this file runs against a scratch HOME holding a synthetic one.
-const CLAUDE_SETTINGS_FIXTURE = {
-  hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "/opt/synthetic/hook" }] }] },
-};
-let scratchHome = "";
+// Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json
+// and require the egress hook contract in it; every test in this file runs against
+// a scratch HOME holding one with executable hook stubs.
+const scratchHome = mkdtempSync(path.join(os.tmpdir(), "acpx-client-home-"));
+const CLAUDE_SETTINGS_FIXTURE = claudeEgressSettings(path.join(scratchHome, "egress-hooks"));
 const originalHome = process.env.HOME;
 
 before(async () => {
-  scratchHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-client-home-"));
-  await fs.mkdir(path.join(scratchHome, ".acpx"));
-  await fs.writeFile(
-    path.join(scratchHome, ".acpx", "claude-settings.json"),
-    JSON.stringify(CLAUDE_SETTINGS_FIXTURE),
-  );
+  assert.deepEqual(await writeClaudeEgressSettings(scratchHome), CLAUDE_SETTINGS_FIXTURE);
   process.env.HOME = scratchHome;
 });
 
@@ -1127,7 +1131,7 @@ for (const method of ["create", "load", "resume"] as const) {
     t.after(async () => {
       await fs.writeFile(settingsFile, saved);
     });
-    for (const content of [undefined, "{not json", "[]", "null"]) {
+    for (const content of [undefined, "{not json", "[]", "null", ...contractViolatingFiles()]) {
       if (content === undefined) {
         await fs.rm(settingsFile);
       } else {
@@ -1154,19 +1158,67 @@ for (const method of ["create", "load", "resume"] as const) {
   });
 }
 
-test("AcpClient sends no Claude settings file when user settings are included", async (t) => {
-  const previous = process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
-  process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = "1";
+// Settings files that parse but break the egress hook contract.
+function contractViolatingFiles(): string[] {
+  const variant = (change: (settings: { hooks: Record<string, any> }) => void): string => {
+    const settings = structuredClone(CLAUDE_SETTINGS_FIXTURE) as { hooks: Record<string, any> };
+    change(settings);
+    return JSON.stringify(settings);
+  };
+  return [
+    "{}",
+    variant((settings) => {
+      delete settings.hooks.PreCompact;
+    }),
+    variant((settings) => {
+      Object.assign(settings, { disableAllHooks: true });
+    }),
+    variant((settings) => {
+      delete settings.hooks.UserPromptSubmit[0].hooks[0].type;
+    }),
+    variant((settings) => {
+      settings.hooks.PostToolUse[0].hooks[0].command = "/nonexistent/egress-cc-post-tool-use";
+    }),
+  ];
+}
+
+function setEnvForTest(t: TestContext, values: Record<string, string>): void {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+}
+
+// User settings with the egress hooks among other settings and hooks.
+function userSettingsWithEgress(): Record<string, unknown> {
+  const settings = structuredClone(CLAUDE_SETTINGS_FIXTURE) as { hooks: Record<string, unknown[]> };
+  settings.hooks.PostToolUse.push({
+    matcher: "Bash",
+    hooks: [{ type: "command", command: "/opt/synthetic/other-hook" }],
+  });
+  return { ...settings, permissions: { allow: ["Read"] }, model: "sonnet" };
+}
+
+test("AcpClient sends no Claude settings file when user settings carry the egress hooks", async (t) => {
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-config-"));
+  setEnvForTest(t, { ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1", CLAUDE_CONFIG_DIR: configDir });
   const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
   const saved = await fs.readFile(settingsFile, "utf8");
   await fs.rm(settingsFile);
+  await fs.writeFile(
+    path.join(configDir, "settings.json"),
+    JSON.stringify(userSettingsWithEgress()),
+  );
   t.after(async () => {
-    if (previous === undefined) {
-      delete process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
-    } else {
-      process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = previous;
-    }
     await fs.writeFile(settingsFile, saved);
+    await fs.rm(configDir, { recursive: true, force: true });
   });
   const fixture = createClientFixture(t, {
     client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
@@ -1175,6 +1227,7 @@ test("AcpClient sends no Claude settings file when user settings are included", 
   const pending = fixture.track(fixture.client.createSession(cwd));
   const request = await fixture.message(0);
   assert("method" in request);
+  // The user settings already carry the hooks: no `settings`, so nothing loads twice.
   assert.deepEqual(request.params, {
     cwd,
     mcpServers: [],
@@ -1182,6 +1235,127 @@ test("AcpClient sends no Claude settings file when user settings are included", 
   });
   await fixture.reply(request, { sessionId: "session-meta" });
   await pending;
+});
+
+for (const method of ["create", "load", "resume"] as const) {
+  test(`AcpClient ${method} refuses included user settings without the egress hooks`, async (t) => {
+    const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-config-"));
+    setEnvForTest(t, { ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1", CLAUDE_CONFIG_DIR: configDir });
+    t.after(async () => {
+      await fs.rm(configDir, { recursive: true, force: true });
+    });
+    const userFile = path.join(configDir, "settings.json");
+    const good = userSettingsWithEgress() as { hooks: Record<string, any> };
+    const hiddenUnderMatcher = structuredClone(good);
+    hiddenUnderMatcher.hooks.UserPromptSubmit[0].matcher = "Bash";
+    const missingHook = structuredClone(good);
+    delete missingHook.hooks.PreCompact;
+    for (const content of [
+      undefined,
+      "{not json",
+      "{}",
+      JSON.stringify(missingHook),
+      JSON.stringify({ ...good, disableAllHooks: true }),
+      JSON.stringify(hiddenUnderMatcher),
+    ]) {
+      await fs.rm(userFile, { force: true });
+      if (content !== undefined) {
+        await fs.writeFile(userFile, content);
+      }
+      const fixture = createClientFixture(t, {
+        client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+      });
+      const cwd = path.resolve("/tmp/acpx-client-meta");
+      const attempt =
+        method === "create"
+          ? fixture.client.createSession(cwd)
+          : method === "load"
+            ? fixture.client.loadSession("session-meta", cwd)
+            : fixture.client.resumeSession("session-meta", cwd);
+      await assert.rejects(attempt, ClaudeSettingsUnavailableError, String(content));
+      assert.equal(fixture.messages.length, 0, "no session request may be sent");
+    }
+  });
+}
+
+test("AcpClient refuses a Claude session whose project settings disable hooks", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-project-"));
+  t.after(async () => {
+    await fs.rm(cwd, { recursive: true, force: true });
+  });
+  await fs.mkdir(path.join(cwd, ".claude"));
+  for (const name of ["settings.json", "settings.local.json"]) {
+    await fs.writeFile(path.join(cwd, ".claude", name), JSON.stringify({ disableAllHooks: true }));
+    const fixture = createClientFixture(t, {
+      client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+    });
+    await assert.rejects(fixture.client.createSession(cwd), /disableAllHooks/, name);
+    assert.equal(fixture.messages.length, 0, "no session request may be sent");
+    await fs.rm(path.join(cwd, ".claude", name));
+  }
+});
+
+test("Claude settings validation refuses managed settings that turn hooks off", async (t) => {
+  const managedDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-managed-"));
+  t.after(async () => {
+    await fs.rm(managedDir, { recursive: true, force: true });
+  });
+  const build = () => buildClaudeCodeOptionsMeta(undefined, true, { managedDir });
+  assert.deepEqual(build(), {
+    claudeCode: {
+      options: { settingSources: ["project", "local"], settings: CLAUDE_SETTINGS_FIXTURE },
+    },
+  });
+  const managed = path.join(managedDir, "managed-settings.json");
+  await fs.writeFile(managed, JSON.stringify({ strictPluginOnlyCustomization: ["skills"] }));
+  assert.doesNotThrow(build);
+  for (const settings of [
+    { allowManagedHooksOnly: true },
+    { strictPluginOnlyCustomization: true },
+    { strictPluginOnlyCustomization: ["hooks"] },
+    { disableAllHooks: true },
+  ]) {
+    await fs.writeFile(managed, JSON.stringify(settings));
+    assert.throws(build, ClaudeSettingsUnavailableError, JSON.stringify(settings));
+  }
+  await fs.rm(managed);
+  await fs.mkdir(path.join(managedDir, "managed-settings.d"));
+  await fs.writeFile(
+    path.join(managedDir, "managed-settings.d", "10-policy.json"),
+    JSON.stringify({ disableAllHooks: true }),
+  );
+  assert.throws(build, /managed-settings\.d/);
+});
+
+test("Claude user settings path follows CLAUDE_CONFIG_DIR", () => {
+  assert.equal(
+    claudeUserSettingsFilePath({}, "/home/synthetic"),
+    path.join("/home/synthetic", ".claude", "settings.json"),
+  );
+  assert.equal(
+    claudeUserSettingsFilePath({ CLAUDE_CONFIG_DIR: "/opt/claude" }, "/home/synthetic"),
+    path.join("/opt/claude", "settings.json"),
+  );
+});
+
+// Liaison pins the same digest for liaison/egress/claude-hooks-contract.json.
+test("vendored Claude egress contract matches its pinned digest", () => {
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value !== null && typeof value === "object"
+        ? Object.fromEntries(
+            Object.keys(value)
+              .toSorted()
+              .map((key) => [key, canonical((value as Record<string, unknown>)[key])]),
+          )
+        : value;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonical(CLAUDE_EGRESS_CONTRACT)))
+    .digest("hex");
+  assert.equal(digest, CLAUDE_EGRESS_CONTRACT_DIGEST);
+  assert.deepEqual(claudeEgressContractViolations(CLAUDE_SETTINGS_FIXTURE, true), []);
+  assert.deepEqual(claudeEgressContractViolations(userSettingsWithEgress(), false), []);
 });
 
 test("Claude settings file loader reads the fixed acpx path and validates it", async () => {
@@ -1201,6 +1375,8 @@ test("Claude settings file loader reads the fixed acpx path and validates it", a
       ["invalid", "{"],
       ["array", "[]"],
       ["string", '"x"'],
+      ["empty", "{}"],
+      ["extra key", JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, permissions: {} })],
     ] as const) {
       const file = path.join(dir, `${name}.json`);
       if (content !== undefined) {

@@ -20,6 +20,7 @@ import {
 } from "../src/session/conversation-model.js";
 import { parseSessionRecord } from "../src/session/persistence.js";
 import type { SessionRecord } from "../src/types.js";
+import { writeClaudeEgressSettings } from "./claude-egress-test-helpers.js";
 import {
   extractAgentMessageChunkText,
   extractJsonRpcId,
@@ -1393,49 +1394,47 @@ test("integration: qoder session reuse preserves persisted startup flags", async
   });
 });
 
-const CLAUDE_SETTINGS_FIXTURE = {
-  hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "/opt/synthetic/hook" }] }] },
-};
-
-async function writeClaudeSettings(homeDir: string): Promise<void> {
-  await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
-  await fs.writeFile(
-    path.join(homeDir, ".acpx", "claude-settings.json"),
-    JSON.stringify(CLAUDE_SETTINGS_FIXTURE),
-  );
+async function writeClaudeSettings(homeDir: string): Promise<Record<string, unknown>> {
+  return await writeClaudeEgressSettings(homeDir);
 }
 
-test("integration: built-in claude exec refuses to start without its settings file", async () => {
+test("integration: built-in claude exec refuses to start without a valid settings file", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
     const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
 
     try {
-      const result = await runCli(
-        [
-          "--agent",
-          claudeCompatibleAgentCommand,
-          "--approve-all",
-          "--cwd",
-          cwd,
-          "--format",
-          "json",
-          "exec",
-          "echo hello",
-        ],
-        homeDir,
-      );
-      assert.notEqual(result.code, 0, "expected a refusal");
-      assert.match(
-        `${result.stderr}\n${result.stdout}`,
-        /Claude settings file is missing or unreadable/,
-      );
-      const payloads = parseJsonRpcOutputLines(result.stdout);
-      assert.equal(
-        payloads.some((payload) => payload.method === "session/new"),
-        false,
-        "no session may be created",
-      );
+      for (const [content, reason] of [
+        [undefined, /Claude settings file is missing or unreadable/],
+        ["{}", /Claude settings file does not hold the egress hook contract/],
+      ] as const) {
+        if (content !== undefined) {
+          await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+          await fs.writeFile(path.join(homeDir, ".acpx", "claude-settings.json"), content);
+        }
+        const result = await runCli(
+          [
+            "--agent",
+            claudeCompatibleAgentCommand,
+            "--approve-all",
+            "--cwd",
+            cwd,
+            "--format",
+            "json",
+            "exec",
+            "echo hello",
+          ],
+          homeDir,
+        );
+        assert.notEqual(result.code, 0, "expected a refusal");
+        assert.match(`${result.stderr}\n${result.stdout}`, reason);
+        const payloads = parseJsonRpcOutputLines(result.stdout);
+        assert.equal(
+          payloads.some((payload) => payload.method === "session/new"),
+          false,
+          "no session may be created",
+        );
+      }
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
@@ -1446,7 +1445,7 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
     const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
-    await writeClaudeSettings(homeDir);
+    const claudeSettings = await writeClaudeSettings(homeDir);
 
     try {
       const created = await runCli(
@@ -1489,7 +1488,7 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             allowedTools: ["Read", "Grep"],
             maxTurns: 7,
             settingSources: ["project", "local"],
-            settings: CLAUDE_SETTINGS_FIXTURE,
+            settings: claudeSettings,
           },
         },
       });
