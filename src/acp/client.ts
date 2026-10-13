@@ -1205,6 +1205,7 @@ export class AcpClient {
     const claudeAcp = isClaudeAcpCommand(command, args);
     const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
 
+    const meta = this.sessionMeta();
     let result: NewSessionResponse;
     try {
       const createPromise = this.runConnectionRequest(
@@ -1212,7 +1213,7 @@ export class AcpClient {
           connection.agent.request(methods.agent.session.new, {
             cwd: sessionCwd,
             mcpServers: this.options.mcpServers ?? [],
-            _meta: this.sessionMeta(),
+            _meta: meta,
           }),
         authority,
       );
@@ -1257,6 +1258,7 @@ export class AcpClient {
     const connection = this.getConnection();
     const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
     assertControlAuthority(options.authority);
+    const meta = this.sessionMeta();
     const previousSuppression = this.suppressSessionUpdates;
     this.suppressSessionUpdates = previousSuppression || Boolean(options.suppressReplayUpdates);
 
@@ -1269,7 +1271,7 @@ export class AcpClient {
             sessionId,
             cwd: sessionCwd,
             mcpServers: this.options.mcpServers ?? [],
-            _meta: this.sessionMeta(),
+            _meta: meta,
           }),
         options.authority,
       );
@@ -1296,13 +1298,14 @@ export class AcpClient {
     assertControlAuthority(authority);
     const connection = this.getConnection();
     const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
+    const meta = this.sessionMeta();
     const response = await this.runConnectionRequest(
       () =>
         connection.agent.request(methods.agent.session.resume, {
           sessionId,
           cwd: sessionCwd,
           mcpServers: this.options.mcpServers ?? [],
-          _meta: this.sessionMeta(),
+          _meta: meta,
         }),
       authority,
     );
