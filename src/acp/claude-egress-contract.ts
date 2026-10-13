@@ -10,7 +10,7 @@ import path from "node:path";
 export const CLAUDE_EGRESS_CONTRACT = {
   schema: "liaison-egress-claude-hooks/1",
   topLevelKeys: ["hooks"],
-  disablingKeys: ["allowManagedHooksOnly", "disableAllHooks", "strictPluginOnlyCustomization"],
+  disablingKeys: ["disableAllHooks"],
   events: {
     PostToolBatch: { script: "egress-cc-post-tool-batch", timeout: 30, onFailure: "block" },
     PostToolUse: { script: "egress-cc-post-tool-use", timeout: 20 },
@@ -22,7 +22,7 @@ export const CLAUDE_EGRESS_CONTRACT = {
 
 // SHA-256 of the canonical contract (sorted keys, compact separators, no "doc").
 export const CLAUDE_EGRESS_CONTRACT_DIGEST =
-  "b25403bee6e386e51e7533b46f1d3bda7419d511890862bf8976c942f525f5fc";
+  "a75eac169a79c173ca35e7596916f2cacb03d67e1b1ec7986ba9f3de13eedddf";
 
 type HookRule = { script: string; timeout: number; onFailure?: string };
 export type CommandCheck = (command: string) => boolean;
@@ -46,17 +46,11 @@ export function isExecutableFile(command: string): boolean {
   }
 }
 
-// Absent, false, or a surface list without "hooks" (strictPluginOnlyCustomization)
-// leaves the hooks on; any other value counts as disabling them.
-function disables(value: unknown): boolean {
-  if (value === undefined || value === null || value === false) {
-    return false;
-  }
-  return Array.isArray(value) ? value.includes("hooks") : true;
-}
-
+// A disabling key set to anything but absent or false turns the egress hooks off.
 export function claudeDisablingKeys(settings: Record<string, unknown>): string[] {
-  return CLAUDE_EGRESS_CONTRACT.disablingKeys.filter((key) => disables(settings[key]));
+  return CLAUDE_EGRESS_CONTRACT.disablingKeys.filter(
+    (key) => settings[key] !== undefined && settings[key] !== null && settings[key] !== false,
+  );
 }
 
 function usableCommand(command: unknown, script: string, isUsable: CommandCheck): string | null {
