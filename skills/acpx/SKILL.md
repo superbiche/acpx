@@ -354,6 +354,15 @@ Set `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` only when the spawned session needs
 the user's global Claude settings and no such plugin conflict exists. Ambient
 credentials and other environment variables are still inherited normally.
 
+Built-in `acpx claude` sessions that exclude user settings pass
+`~/.acpx/claude-settings.json` to Claude Code as flag settings, which apply
+whatever setting sources are loaded. Use it for settings every spawned session
+must carry, such as required hooks. When the file is missing, unreadable, not
+valid JSON, or not a JSON object, acpx refuses to create, load, or resume the
+session rather than start it without them. With
+`ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not read: the user settings
+already apply.
+
 On Windows, native Claude executable discovery resolves relative `PATH` entries
 from the selected session cwd. An explicit `CLAUDE_CODE_EXECUTABLE` still takes
 precedence.

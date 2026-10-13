@@ -738,6 +738,11 @@ Claude Code user settings. By default, they load only project and local settings
 to avoid globally enabled channel or daemon plugins interfering with spawned ACP
 sessions.
 
+Without user settings, built-in `claude` sessions pass
+`~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to
+start when that file is missing, unreadable, or not a JSON object. The file is
+not read when `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`.
+
 `ACPX_PERF_METRICS_FILE` enables optional NDJSON performance capture, including
 command arguments. On POSIX, capture files use `0600`; existing parent directory
 permissions are preserved. Symbolic links, hardlinked files, and special files such

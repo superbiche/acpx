@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import test, { type TestContext } from "node:test";
+import test, { after, before, type TestContext } from "node:test";
 import {
   methods,
   type AnyMessage,
@@ -15,6 +15,10 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
+import {
+  claudeCodeSettingsFilePath,
+  loadClaudeCodeSettingsFile,
+} from "../src/acp/agent-command.js";
 import {
   AcpClient,
   buildAgentSpawnOptions,
@@ -29,6 +33,7 @@ import {
   AgentSpawnError,
   AgentStartupError,
   AuthPolicyError,
+  ClaudeSettingsUnavailableError,
   PermissionDeniedError,
   PermissionPromptUnavailableError,
   UnsupportedPromptContentError,
@@ -37,6 +42,33 @@ import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
 import { createSessionConversation } from "../src/session/conversation-model.js";
 import type { AcpProcessStarted } from "../src/types.js";
 import { withMockedReadline, withTtyState } from "./tty-test-helpers.js";
+
+// Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json;
+// every test in this file runs against a scratch HOME holding a synthetic one.
+const CLAUDE_SETTINGS_FIXTURE = {
+  hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "/opt/synthetic/hook" }] }] },
+};
+let scratchHome = "";
+const originalHome = process.env.HOME;
+
+before(async () => {
+  scratchHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-client-home-"));
+  await fs.mkdir(path.join(scratchHome, ".acpx"));
+  await fs.writeFile(
+    path.join(scratchHome, ".acpx", "claude-settings.json"),
+    JSON.stringify(CLAUDE_SETTINGS_FIXTURE),
+  );
+  process.env.HOME = scratchHome;
+});
+
+after(async () => {
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+  await fs.rm(scratchHome, { recursive: true, force: true });
+});
 
 test("parseAcpJsonMessageLine ignores non-object JSON values", () => {
   for (const line of ["1", "null", '"diagnostic"', "[]", "[{}]"]) {
@@ -1006,7 +1038,11 @@ for (const scenario of [
   {
     name: "AcpClient creates built-in Claude sessions without user settings by default",
     options: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
-    meta: { claudeCode: { options: { settingSources: ["project", "local"] } } },
+    meta: {
+      claudeCode: {
+        options: { settingSources: ["project", "local"], settings: CLAUDE_SETTINGS_FIXTURE },
+      },
+    },
   },
   {
     name: "AcpClient createSession forwards systemPrompt string in _meta",
@@ -1069,7 +1105,12 @@ for (const method of ["load", "resume"] as const) {
       mcpServers: [],
       _meta: {
         claudeCode: {
-          options: { settingSources: ["project", "local"], allowedTools: ["Read"], maxTurns: 5 },
+          options: {
+            settingSources: ["project", "local"],
+            settings: CLAUDE_SETTINGS_FIXTURE,
+            allowedTools: ["Read"],
+            maxTurns: 5,
+          },
         },
         systemPrompt: "synthetic",
       },
@@ -1078,6 +1119,99 @@ for (const method of ["load", "resume"] as const) {
     await pending;
   });
 }
+
+for (const method of ["create", "load", "resume"] as const) {
+  test(`AcpClient ${method} refuses a built-in Claude session when its settings file is unusable`, async (t) => {
+    const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
+    const saved = await fs.readFile(settingsFile, "utf8");
+    t.after(async () => {
+      await fs.writeFile(settingsFile, saved);
+    });
+    for (const content of [undefined, "{not json", "[]", "null"]) {
+      if (content === undefined) {
+        await fs.rm(settingsFile);
+      } else {
+        await fs.writeFile(settingsFile, content);
+      }
+      const fixture = createClientFixture(t, {
+        client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+      });
+      const cwd = path.resolve("/tmp/acpx-client-meta");
+      const attempt =
+        method === "create"
+          ? fixture.client.createSession(cwd)
+          : method === "load"
+            ? fixture.client.loadSession("session-meta", cwd)
+            : fixture.client.resumeSession("session-meta", cwd);
+      await assert.rejects(attempt, (error: unknown) => {
+        assert(error instanceof ClaudeSettingsUnavailableError);
+        assert.equal(error.detailCode, "CLAUDE_SETTINGS_UNAVAILABLE");
+        assert.equal(error.retryable, false);
+        return true;
+      });
+      assert.equal(fixture.messages.length, 0, "no session request may be sent");
+    }
+  });
+}
+
+test("AcpClient sends no Claude settings file when user settings are included", async (t) => {
+  const previous = process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
+  process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = "1";
+  const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
+  const saved = await fs.readFile(settingsFile, "utf8");
+  await fs.rm(settingsFile);
+  t.after(async () => {
+    if (previous === undefined) {
+      delete process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
+    } else {
+      process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = previous;
+    }
+    await fs.writeFile(settingsFile, saved);
+  });
+  const fixture = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  const cwd = path.resolve("/tmp/acpx-client-meta");
+  const pending = fixture.track(fixture.client.createSession(cwd));
+  const request = await fixture.message(0);
+  assert("method" in request);
+  assert.deepEqual(request.params, {
+    cwd,
+    mcpServers: [],
+    _meta: { claudeCode: { options: { settingSources: ["user", "project", "local"] } } },
+  });
+  await fixture.reply(request, { sessionId: "session-meta" });
+  await pending;
+});
+
+test("Claude settings file loader reads the fixed acpx path and validates it", async () => {
+  assert.equal(
+    claudeCodeSettingsFilePath("/home/synthetic"),
+    path.join("/home/synthetic", ".acpx", "claude-settings.json"),
+  );
+  assert.equal(
+    claudeCodeSettingsFilePath(),
+    path.join(scratchHome, ".acpx", "claude-settings.json"),
+  );
+  assert.deepEqual(loadClaudeCodeSettingsFile(), CLAUDE_SETTINGS_FIXTURE);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-settings-"));
+  try {
+    for (const [name, content] of [
+      ["missing", undefined],
+      ["invalid", "{"],
+      ["array", "[]"],
+      ["string", '"x"'],
+    ] as const) {
+      const file = path.join(dir, `${name}.json`);
+      if (content !== undefined) {
+        await fs.writeFile(file, content);
+      }
+      assert.throws(() => loadClaudeCodeSettingsFile(file), ClaudeSettingsUnavailableError, name);
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("resolveClaudeCodeSettingSources includes user settings only when explicitly enabled", () => {
   assert.deepEqual(resolveClaudeCodeSettingSources({}), ["project", "local"]);

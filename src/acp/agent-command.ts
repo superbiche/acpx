@@ -1,4 +1,7 @@
-import { CopilotAcpUnsupportedError } from "../errors.js";
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { ClaudeSettingsUnavailableError, CopilotAcpUnsupportedError } from "../errors.js";
 import { readWindowsEnvValue, resolveWindowsExecutablePath } from "../spawn-command-options.js";
 import { type AcpClientOptions } from "../types.js";
 import { basenameToken, splitCommandLine } from "./client-process.js";
@@ -263,10 +266,11 @@ export async function ensureCopilotAcpSupport(
 export function buildClaudeCodeOptionsMeta(
   options: AcpClientOptions["sessionOptions"],
   isolateUserSettings = false,
+  loadSettings: () => Record<string, unknown> = loadClaudeCodeSettingsFile,
 ): Record<string, unknown> | undefined {
   const claudeCodeOptions: Record<string, unknown> = {};
   if (isolateUserSettings) {
-    claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
+    assignClaudeCodeSettingIsolation(claudeCodeOptions, loadSettings);
   }
   if (options) {
     assignClaudeCodeOptions(claudeCodeOptions, options);
@@ -284,6 +288,55 @@ export function buildClaudeCodeOptionsMeta(
   }
 
   return meta;
+}
+
+// Isolated sessions still need the settings every session must carry (such as
+// required hooks): they come from a dedicated file, never from the user
+// settings. When user settings are included, those already carry them.
+function assignClaudeCodeSettingIsolation(
+  target: Record<string, unknown>,
+  loadSettings: () => Record<string, unknown>,
+): void {
+  const settingSources = resolveClaudeCodeSettingSources();
+  target.settingSources = settingSources;
+  if (!settingSources.includes("user")) {
+    target.settings = loadSettings();
+  }
+}
+
+export function claudeCodeSettingsFilePath(home: string = os.homedir()): string {
+  return path.join(home, ".acpx", "claude-settings.json");
+}
+
+// Fail closed: a missing, unreadable or invalid file refuses the session
+// rather than starting one without the settings it must carry.
+export function loadClaudeCodeSettingsFile(
+  filePath: string = claudeCodeSettingsFilePath(),
+): Record<string, unknown> {
+  let text: string;
+  try {
+    text = readFileSync(filePath, "utf8");
+  } catch (error) {
+    throw new ClaudeSettingsUnavailableError(
+      `Claude settings file is missing or unreadable: ${filePath}. Built-in claude sessions without user settings require it; refusing to start the session.`,
+      { cause: error },
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new ClaudeSettingsUnavailableError(
+      `Claude settings file is not valid JSON: ${filePath}; refusing to start the session.`,
+      { cause: error },
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ClaudeSettingsUnavailableError(
+      `Claude settings file must hold a JSON object: ${filePath}; refusing to start the session.`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export function resolveClaudeCodeSettingSources(env: NodeJS.ProcessEnv = process.env): string[] {

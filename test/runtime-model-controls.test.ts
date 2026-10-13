@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test, { type TestContext } from "node:test";
+import test, { after, before, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   createAcpRuntime,
@@ -10,6 +10,26 @@ import {
   createFileSessionStore,
   isRequestedModelUnsupportedError,
 } from "../src/runtime.js";
+
+// Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json.
+const originalHome = process.env.HOME;
+let scratchHome = "";
+
+before(async () => {
+  scratchHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-model-controls-home-"));
+  await fs.mkdir(path.join(scratchHome, ".acpx"));
+  await fs.writeFile(path.join(scratchHome, ".acpx", "claude-settings.json"), "{}");
+  process.env.HOME = scratchHome;
+});
+
+after(async () => {
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+  await fs.rm(scratchHome, { recursive: true, force: true });
+});
 
 const peer = fileURLToPath(
   new URL(

@@ -1393,10 +1393,60 @@ test("integration: qoder session reuse preserves persisted startup flags", async
   });
 });
 
+const CLAUDE_SETTINGS_FIXTURE = {
+  hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "/opt/synthetic/hook" }] }] },
+};
+
+async function writeClaudeSettings(homeDir: string): Promise<void> {
+  await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+  await fs.writeFile(
+    path.join(homeDir, ".acpx", "claude-settings.json"),
+    JSON.stringify(CLAUDE_SETTINGS_FIXTURE),
+  );
+}
+
+test("integration: built-in claude exec refuses to start without its settings file", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+    const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
+
+    try {
+      const result = await runCli(
+        [
+          "--agent",
+          claudeCompatibleAgentCommand,
+          "--approve-all",
+          "--cwd",
+          cwd,
+          "--format",
+          "json",
+          "exec",
+          "echo hello",
+        ],
+        homeDir,
+      );
+      assert.notEqual(result.code, 0, "expected a refusal");
+      assert.match(
+        `${result.stderr}\n${result.stdout}`,
+        /Claude settings file is missing or unreadable/,
+      );
+      const payloads = parseJsonRpcOutputLines(result.stdout);
+      assert.equal(
+        payloads.some((payload) => payload.method === "session/new"),
+        false,
+        "no session may be created",
+      );
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 test("integration: exec forwards model, allowed-tools, and max-turns in session/new _meta", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
     const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
+    await writeClaudeSettings(homeDir);
 
     try {
       const created = await runCli(
@@ -1439,6 +1489,7 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             allowedTools: ["Read", "Grep"],
             maxTurns: 7,
             settingSources: ["project", "local"],
+            settings: CLAUDE_SETTINGS_FIXTURE,
           },
         },
       });
@@ -1978,6 +2029,7 @@ test("integration: exec --model rejects models not advertised by the agent", asy
 for (const reconnect of ["load", "resume"] as const) {
   test(`integration: Claude ACP prompt forwards saved model missing from session/${reconnect} advertisement`, async () => {
     await withTempHome(async (homeDir) => {
+      await writeClaudeSettings(homeDir);
       const fakeBinDir = path.join(homeDir, "bin");
       await fs.mkdir(fakeBinDir);
       const fakeClaude = await writeFakeClaudeAgent(fakeBinDir);
@@ -3388,6 +3440,7 @@ test("integration: copilot ACP unsupported binary is surfaced as actionable erro
 
 test("integration: claude ACP session creation timeout is surfaced as actionable error", async () => {
   await withTempHome(async (homeDir) => {
+    await writeClaudeSettings(homeDir);
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
     const fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-fake-claude-acp-"));
     const fakeClaudeAcpPath = path.join(fakeBinDir, "claude-agent-acp");

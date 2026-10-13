@@ -195,6 +195,18 @@ export class ClaudeAcpSessionCreateTimeoutError extends AcpxOperationalError {
   }
 }
 
+export class ClaudeSettingsUnavailableError extends AcpxOperationalError {
+  constructor(message: string, options?: AcpxErrorOptions) {
+    super(message, {
+      outputCode: "RUNTIME",
+      detailCode: "CLAUDE_SETTINGS_UNAVAILABLE",
+      origin: "cli",
+      retryable: false,
+      ...options,
+    });
+  }
+}
+
 export class CopilotAcpUnsupportedError extends AcpxOperationalError {
   constructor(message: string, options?: AcpxErrorOptions) {
     super(message, {
