@@ -14,7 +14,7 @@ Repo: https://github.com/openclaw/acpx
 - Output: report malformed tool locations and content without disconnecting text-mode prompts, preserving later assistant output and completion. Thanks @SebTardif.
 - Sessions: cap imported journal retention and scan existing segments efficiently while preserving higher retention settings and history already saved locally. Thanks @SebTardif.
 - Sessions: recover the first prompt or control of a confirmed newly created persistent session after an internal load error; preserve explicitly resumed sessions, legacy records without creation provenance, imports, and existing history. Thanks @superbiche.
-- Claude: built-in sessions without user settings pass `~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to create, load or resume unless it holds exactly the declared egress hook contract with executable commands; with `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the user settings must carry those hooks instead, and managed, project or local settings that disable hooks refuse the session. Thanks @superbiche.
+- Claude: built-in sessions without user settings pass `~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to create, load or resume unless it holds exactly the declared egress hook contract with executable commands; with `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the user settings must carry those hooks instead, and project or local settings that set `disableAllHooks` refuse the session. Thanks @superbiche.
 
 ## 0.19.4 - 2026-09-30
 

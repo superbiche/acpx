@@ -171,7 +171,7 @@ Without user settings, built-in `claude` sessions pass
 start unless that file holds exactly Liaison's egress hook contract with
 executable commands. With `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not
 read and the user settings must carry the contract hooks instead. Either way,
-managed, project, or local settings that turn hooks off refuse the session.
+project or local settings that set `disableAllHooks` refuse the session.
 
 Other ACP-relevant behavior:
 

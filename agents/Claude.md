@@ -32,9 +32,7 @@ refuses to create, load, or resume the session and sends no session request.
 With `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not read; the user
 settings (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`)
 must carry the contract hooks instead, so nothing loads twice. In both cases
-acpx also refuses when the managed, project, or local settings set
-`disableAllHooks`, `allowManagedHooksOnly`, or `strictPluginOnlyCustomization`
-covering hooks.
+acpx also refuses when the project or local settings set `disableAllHooks`.
 
 On Windows, native Claude executable discovery resolves relative `PATH` entries
 from the selected session cwd. An explicit `CLAUDE_CODE_EXECUTABLE` still takes

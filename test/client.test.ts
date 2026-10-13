@@ -18,7 +18,6 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import {
-  buildClaudeCodeOptionsMeta,
   claudeCodeSettingsFilePath,
   claudeUserSettingsFilePath,
   loadClaudeCodeSettingsFile,
@@ -1293,38 +1292,6 @@ test("AcpClient refuses a Claude session whose project settings disable hooks", 
     assert.equal(fixture.messages.length, 0, "no session request may be sent");
     await fs.rm(path.join(cwd, ".claude", name));
   }
-});
-
-test("Claude settings validation refuses managed settings that turn hooks off", async (t) => {
-  const managedDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-managed-"));
-  t.after(async () => {
-    await fs.rm(managedDir, { recursive: true, force: true });
-  });
-  const build = () => buildClaudeCodeOptionsMeta(undefined, true, { managedDir });
-  assert.deepEqual(build(), {
-    claudeCode: {
-      options: { settingSources: ["project", "local"], settings: CLAUDE_SETTINGS_FIXTURE },
-    },
-  });
-  const managed = path.join(managedDir, "managed-settings.json");
-  await fs.writeFile(managed, JSON.stringify({ strictPluginOnlyCustomization: ["skills"] }));
-  assert.doesNotThrow(build);
-  for (const settings of [
-    { allowManagedHooksOnly: true },
-    { strictPluginOnlyCustomization: true },
-    { strictPluginOnlyCustomization: ["hooks"] },
-    { disableAllHooks: true },
-  ]) {
-    await fs.writeFile(managed, JSON.stringify(settings));
-    assert.throws(build, ClaudeSettingsUnavailableError, JSON.stringify(settings));
-  }
-  await fs.rm(managed);
-  await fs.mkdir(path.join(managedDir, "managed-settings.d"));
-  await fs.writeFile(
-    path.join(managedDir, "managed-settings.d", "10-policy.json"),
-    JSON.stringify({ disableAllHooks: true }),
-  );
-  assert.throws(build, /managed-settings\.d/);
 });
 
 test("Claude user settings path follows CLAUDE_CONFIG_DIR", () => {

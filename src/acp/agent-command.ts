@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeSettingsUnavailableError, CopilotAcpUnsupportedError } from "../errors.js";
@@ -270,12 +270,11 @@ export async function ensureCopilotAcpSupport(
 }
 
 // Where a Claude session's settings come from. Defaults: the process environment,
-// the user's home, no project directory, the platform's managed-settings directory.
+// the user's home, no project directory.
 export type ClaudeSettingsContext = {
   env?: NodeJS.ProcessEnv;
   home?: string;
   cwd?: string;
-  managedDir?: string;
   isUsable?: CommandCheck;
 };
 
@@ -340,13 +339,6 @@ export function claudeUserSettingsFilePath(
   return path.join(configDir ? configDir : path.join(home, ".claude"), "settings.json");
 }
 
-export function claudeManagedSettingsDir(platform: NodeJS.Platform = process.platform): string {
-  if (platform === "darwin") {
-    return "/Library/Application Support/ClaudeCode";
-  }
-  return platform === "win32" ? "C:\\Program Files\\ClaudeCode" : "/etc/claude-code";
-}
-
 function refuse(message: string, cause?: unknown): ClaudeSettingsUnavailableError {
   return new ClaudeSettingsUnavailableError(`${message}; refusing to start the session.`, {
     cause,
@@ -398,25 +390,15 @@ function requireClaudeUserSettingsHooks(context: ClaudeSettingsContext): void {
   }
 }
 
-// Project, local and managed settings also load; any of them may disable hooks.
+// Project and local settings also load; either may disable hooks.
 function claudeOtherSettingsFiles(context: ClaudeSettingsContext): string[] {
-  const managedDir = context.managedDir ?? claudeManagedSettingsDir();
-  const files = [path.join(managedDir, "managed-settings.json")];
-  try {
-    const dropIns = path.join(managedDir, "managed-settings.d");
-    for (const name of readdirSync(dropIns).toSorted()) {
-      if (name.endsWith(".json")) {
-        files.push(path.join(dropIns, name));
-      }
-    }
-  } catch {
-    // no drop-in directory
+  if (!context.cwd) {
+    return [];
   }
-  if (context.cwd) {
-    files.push(path.join(context.cwd, ".claude", "settings.json"));
-    files.push(path.join(context.cwd, ".claude", "settings.local.json"));
-  }
-  return files;
+  return [
+    path.join(context.cwd, ".claude", "settings.json"),
+    path.join(context.cwd, ".claude", "settings.local.json"),
+  ];
 }
 
 function readOptionalSettings(filePath: string): Record<string, unknown> | undefined {
