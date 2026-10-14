@@ -168,11 +168,16 @@ start unless that file carries Liaison's egress hook contract with executable
 commands and sets neither `permissions.allow`, `permissions.defaultMode` nor a
 hook-disabling switch in `env`. `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`,
 `CLAUDE_CODE_SIMPLE` and `CLAUDE_CODE_SAFE_MODE` in the agent environment refuse
-the session. Project configuration is read from the empty
-`~/.acpx/claude-project-config` directory (CLAUDE.md and `.claude/rules` still
-load from the session directory), allow rules are ignored in favour of the acpx
-permission policy, and the session stays in Claude Code's `default` (or `plan`)
-permission mode. See the Settings isolation section of `agents/Claude.md`.
+the session, and acpx sets `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SAFE_MODE`,
+`CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_PLUGIN_DIRS` and
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS` to inert values in the Claude Code process
+environment whatever a launcher exported. Project configuration is read from the
+empty `~/.acpx/claude-project-config` directory (CLAUDE.md and `.claude/rules`
+still load from the session directory), the operator's skills and agents come
+from the `~/.acpx/claude-user-plugin` plugin when it exists, allow rules are
+ignored in favour of the acpx permission policy, and the session stays in Claude
+Code's `default` (or `plan`) permission mode. See the Settings isolation section
+of `agents/Claude.md`, which lists what these sessions load and what they do not.
 
 Other ACP-relevant behavior:
 
