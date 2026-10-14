@@ -2,18 +2,20 @@ import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeSettingsUnavailableError } from "../errors.js";
-import { checkFrontmatter, type FrontmatterKind } from "./claude-frontmatter.js";
 
 // The operator's own Claude Code skills and agents reach Claude-family sessions as
 // one local plugin, ~/.acpx/claude-user-plugin, rendered by the operator's tooling
 // (Liaison: `liaison acpx link`). Claude Code lists them as `<plugin name>:<name>`.
 // A plugin can carry more than skills and agents (hooks, MCP and LSP servers,
-// commands, settings), and a skill or agent file can widen what the session may do
-// (allowed-tools approve tool calls without asking acpx; hooks can answer allow).
-// Only skills and agents whose frontmatter passes the allowlist of
-// claude-frontmatter.ts are accepted, read again at every session start through the
-// symlinks; anything else refuses the session, so a stale or hand-edited plugin
-// never loads.
+// commands, settings), so the plugin's own structure is checked at every session
+// start: a real directory holding only the manifest, skills and agents, and a
+// manifest with only name, description and version. A stale or hand-edited plugin
+// that fails this never loads.
+//
+// Skill and agent content is delivered as-is: their frontmatter is not screened
+// here. A grant key in it (allowed-tools, hooks, permissionMode) can pre-approve
+// tool calls without an ACP permission request; that is Claude Code / adapter
+// behavior tracked upstream, and the renderer reports such files when it links them.
 
 export type ClaudeUserPlugin = { type: "local"; path: string; skipMcpDiscovery: true };
 
@@ -29,21 +31,6 @@ function refuse(message: string, cause?: unknown): ClaudeSettingsUnavailableErro
     `${message}; re-render it with \`liaison acpx link --install\` or remove it; refusing to start the session.`,
     { cause },
   );
-}
-
-function checkFile(file: string, kind: FrontmatterKind, label: string): void {
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (error) {
-    throw refuse(`Claude user plugin file is unreadable: ${file}`, error);
-  }
-  const verdict = checkFrontmatter(text, kind);
-  if (!verdict.admitted) {
-    throw refuse(
-      `Claude user plugin ${label} frontmatter is outside the allowlist (${verdict.code}: ${verdict.detail})`,
-    );
-  }
 }
 
 function realDirectory(dir: string, label: string): void {
@@ -94,7 +81,6 @@ function checkSkills(dir: string): void {
     if (!stat.isDirectory() || !statSafe(file)?.isFile()) {
       throw refuse(`Claude user plugin skill is not a skill directory: ${skill}`);
     }
-    checkFile(file, "skill", `skill ${name}`);
   }
 }
 
@@ -105,7 +91,6 @@ function checkAgents(dir: string): void {
     if (!name.endsWith(".md") || !statSafe(file)?.isFile()) {
       throw refuse(`Claude user plugin agent is not a Markdown file: ${file}`);
     }
-    checkFile(file, "agent", `agent ${name}`);
   }
 }
 
@@ -126,7 +111,7 @@ function statSafe(file: string) {
 }
 
 // The plugin to load, undefined when there is none; refuses one that carries
-// anything but plain skills and agents.
+// anything but a manifest, skills and agents.
 export function loadClaudeUserPlugin(home: string = os.homedir()): ClaudeUserPlugin | undefined {
   const dir = claudeUserPluginPath(home);
   const stat = lstatSafe(dir);
