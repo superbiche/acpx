@@ -564,6 +564,30 @@ test("loadResolvedConfig rejects ambiguous or quoted legacy command plus args", 
   });
 });
 
+test("loadResolvedConfig accepts only the claude agent family", async () => {
+  await withTempEnv(async ({ homeDir }) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    const write = (family: unknown) =>
+      fs.writeFile(
+        path.join(homeDir, ".acpx", "config.json"),
+        `${JSON.stringify({ agents: { glm: { command: "/opt/bin/glm-agent-acp.sh", family } } })}\n`,
+      );
+    await write("claude");
+    const config = await loadResolvedConfig(cwd);
+    assert.equal(config.agents.glm?.command, "/opt/bin/glm-agent-acp.sh");
+    for (const family of ["Claude", "codex", 1, null]) {
+      await write(family);
+      await assert.rejects(
+        () => loadResolvedConfig(cwd),
+        /Invalid config agents\.glm\.family.*expected "claude"/u,
+        String(family),
+      );
+    }
+  });
+});
+
 async function withTempEnv(run: (ctx: { homeDir: string }) => Promise<void>): Promise<void> {
   const originalHome = process.env.HOME;
 

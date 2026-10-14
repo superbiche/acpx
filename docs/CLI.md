@@ -738,12 +738,16 @@ Claude Code user settings. By default, they load only project and local settings
 to avoid globally enabled channel or daemon plugins interfering with spawned ACP
 sessions.
 
-Without user settings, built-in `claude` sessions pass
+Without user settings, Claude-family sessions pass
 `~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to
-start unless that file holds exactly Liaison's egress hook contract with
-executable commands. With `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not
-read and the user settings must carry the contract hooks instead. Either way,
-project or local settings that set `disableAllHooks` refuse the session.
+start unless that file carries Liaison's egress hook contract with executable
+commands and sets neither `permissions.allow` nor `permissions.defaultMode`.
+With `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` the file is not read and the user
+settings must carry the contract hooks instead. Either way, project or local
+settings that set `disableAllHooks` refuse the session, allow rules from every
+settings source are ignored in favour of the acpx permission policy, and the
+session runs in Claude Code's `default` permission mode. See
+the Settings isolation section of `agents/Claude.md`.
 
 `ACPX_PERF_METRICS_FILE` enables optional NDJSON performance capture, including
 command arguments. On POSIX, capture files use `0600`; existing parent directory

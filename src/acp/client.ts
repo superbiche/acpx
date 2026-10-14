@@ -48,6 +48,7 @@ import {
   AgentStartupError,
   AuthPolicyError,
   ClaudeAcpSessionCreateTimeoutError,
+  ClaudeSettingsUnavailableError,
   GeminiAcpStartupTimeoutError,
   PermissionDeniedError,
   PermissionPromptUnavailableError,
@@ -83,6 +84,7 @@ import {
   buildQoderAcpCommandArgs,
   ensureCopilotAcpSupport,
   isClaudeAcpCommand,
+  isClaudeFamilyAgent,
   isCopilotAcpCommand,
   isDevinAcpCommand,
   isGeminiAcpCommand,
@@ -265,6 +267,20 @@ function normalizeConfigOptionAcknowledgement(
   const acknowledgement: Partial<SetSessionConfigOptionResponse> = { ...response };
   delete acknowledgement.configOptions;
   return acknowledgement as SetSessionConfigOptionResponse;
+}
+
+const CLAUDE_DEFAULT_MODE_ID = "default";
+
+function reportedModeId(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") {
+    return undefined;
+  }
+  const modes = (response as { modes?: unknown }).modes;
+  if (!modes || typeof modes !== "object") {
+    return undefined;
+  }
+  const current = (modes as { currentModeId?: unknown }).currentModeId;
+  return typeof current === "string" ? current : undefined;
 }
 
 function toReconnectedSessionResult(
@@ -1164,16 +1180,38 @@ export class AcpClient {
     });
   }
 
-  private sessionMeta(cwd: string): Record<string, unknown> | undefined {
+  private isClaudeFamily(): boolean {
     const { command, args } = resolveAgentCommandParts(
       this.options.agentCommand,
       this.options.agentArgv,
     );
-    return buildClaudeCodeOptionsMeta(
-      this.options.sessionOptions,
-      isClaudeAcpCommand(command, args),
-      { cwd },
-    );
+    return isClaudeFamilyAgent({ command, args, agentInfoName: this.initResult?.agentInfo?.name });
+  }
+
+  private sessionMeta(cwd: string): Record<string, unknown> | undefined {
+    return buildClaudeCodeOptionsMeta(this.options.sessionOptions, this.isClaudeFamily(), { cwd });
+  }
+
+  // Claude Code starts a session in the user's permissions.defaultMode, which the
+  // adapter reads from the user settings even when acpx excludes them. Any mode
+  // but "default" approves some tool calls without asking acpx, so a Claude-family
+  // session is put back in "default" before acpx uses it; failing that, refused.
+  private async enforceClaudeDefaultMode(
+    sessionId: string,
+    response: unknown,
+    authority?: AcpControlAuthority,
+  ): Promise<void> {
+    if (!this.isClaudeFamily() || reportedModeId(response) === CLAUDE_DEFAULT_MODE_ID) {
+      return;
+    }
+    try {
+      await this.setSessionMode(sessionId, CLAUDE_DEFAULT_MODE_ID, authority);
+    } catch (error) {
+      throw new ClaudeSettingsUnavailableError(
+        `Claude session ${sessionId} could not be put in the "${CLAUDE_DEFAULT_MODE_ID}" permission mode; refusing to use it.`,
+        { cause: error },
+      );
+    }
   }
 
   async createSession(
@@ -1182,11 +1220,7 @@ export class AcpClient {
   ): Promise<SessionCreateResult> {
     assertControlAuthority(authority);
     const connection = this.getConnection();
-    const { command, args } = resolveAgentCommandParts(
-      this.options.agentCommand,
-      this.options.agentArgv,
-    );
-    const claudeAcp = isClaudeAcpCommand(command, args);
+    const claudeAcp = this.isClaudeFamily();
     const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
 
     const meta = this.sessionMeta(sessionCwd);
@@ -1214,6 +1248,7 @@ export class AcpClient {
       throw error;
     }
 
+    await this.enforceClaudeDefaultMode(result.sessionId, result, authority);
     this.loadedSessionId = result.sessionId;
     const configOptions = normalizeResponseConfigOptions(result);
     const models = modelStateFromSessionResponse({ configOptions, response: result });
@@ -1269,6 +1304,7 @@ export class AcpClient {
       this.restoreSessionUpdateSuppression(previousSuppression);
     }
 
+    await this.enforceClaudeDefaultMode(sessionId, response, options.authority);
     this.loadedSessionId = sessionId;
     const result = toReconnectedSessionResult(response);
     await this.captureAgentDescendants(this.agent);
@@ -1295,6 +1331,7 @@ export class AcpClient {
       authority,
     );
 
+    await this.enforceClaudeDefaultMode(sessionId, response, authority);
     this.loadedSessionId = sessionId;
     const result = toReconnectedSessionResult(response);
     await this.captureAgentDescendants(this.agent);

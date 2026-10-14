@@ -1406,7 +1406,7 @@ test("integration: built-in claude exec refuses to start without a valid setting
     try {
       for (const [content, reason] of [
         [undefined, /Claude settings file is missing or unreadable/],
-        ["{}", /Claude settings file does not hold the egress hook contract/],
+        ["{}", /Claude settings file does not carry the egress hook contract/],
       ] as const) {
         if (content !== undefined) {
           await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
@@ -1489,9 +1489,15 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             maxTurns: 7,
             settingSources: ["project", "local"],
             settings: claudeSettings,
+            managedSettings: { allowManagedPermissionRulesOnly: true, permissions: {} },
+            allowDangerouslySkipPermissions: false,
           },
         },
       });
+      const setMode = payloads.find((payload) => payload.method === "session/set_mode") as
+        | { params?: { modeId?: unknown } }
+        | undefined;
+      assert.equal(setMode?.params?.modeId, "default", "a Claude session is put in default mode");
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }

@@ -71,6 +71,70 @@ export function isClaudeAcpCommand(command: string, args: readonly string[]): bo
   return args.some((arg) => arg.includes("claude-agent-acp"));
 }
 
+// Package names the Claude Code ACP adapter reports in its initialize agentInfo,
+// current and former (@zed-industries/claude-code-acp).
+const CLAUDE_ADAPTER_NAMES = ["claude-agent-acp", "claude-code-acp"] as const;
+
+export function isClaudeAgentInfoName(name: unknown): boolean {
+  return typeof name === "string" && CLAUDE_ADAPTER_NAMES.some((adapter) => name.includes(adapter));
+}
+
+// Executables the global acpx config declares as Claude family
+// (`agents.<name>.family: "claude"`), for wrappers whose name says nothing.
+export function declaredClaudeFamilyExecutables(home: string = os.homedir()): Set<string> {
+  const executables = new Set<string>();
+  for (const entry of readGlobalConfigAgents(home)) {
+    const executable = entry.family === "claude" ? agentEntryExecutable(entry) : undefined;
+    if (executable) {
+      executables.add(executable);
+    }
+  }
+  return executables;
+}
+
+function readGlobalConfigAgents(home: string): Record<string, unknown>[] {
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(path.join(home, ".acpx", "config.json"), "utf8"));
+  } catch {
+    return []; // absent or invalid: the config loader reports it
+  }
+  const agents = isPlainObject(config) ? config.agents : undefined;
+  return isPlainObject(agents) ? Object.values(agents).filter(isPlainObject) : [];
+}
+
+function agentEntryExecutable(entry: Record<string, unknown>): string | undefined {
+  const argv: unknown = entry.argv;
+  const executable: unknown = Array.isArray(argv)
+    ? argv[0]
+    : typeof entry.command === "string"
+      ? splitCommandLine(entry.command.trim()).command
+      : undefined;
+  return typeof executable === "string" && executable.length > 0 ? executable : undefined;
+}
+
+export type ClaudeFamilyEvidence = {
+  command: string;
+  args: readonly string[];
+  agentInfoName?: unknown;
+  home?: string;
+};
+
+// Claude family: the Claude Code ACP adapter however it is launched. Any one
+// signal suffices: the adapter's own initialize identity, a declaration in the
+// global acpx config, or the adapter's command name.
+export function isClaudeFamilyAgent(evidence: ClaudeFamilyEvidence): boolean {
+  return (
+    isClaudeAgentInfoName(evidence.agentInfoName) ||
+    declaredClaudeFamilyExecutables(evidence.home).has(evidence.command) ||
+    isClaudeAcpCommand(evidence.command, evidence.args)
+  );
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function isCopilotAcpCommand(command: string, args: readonly string[]): boolean {
   return basenameToken(command) === "copilot" && args.includes("--acp");
 }
@@ -305,26 +369,55 @@ export function buildClaudeCodeOptionsMeta(
   return meta;
 }
 
-// Every built-in Claude session must run the egress hooks of the declared contract
+// Every Claude-family session must run the egress hooks of the declared contract
 // (src/acp/claude-egress-contract.ts). Isolated sessions get them from a dedicated
 // file, never from the user settings; sessions that include user settings must find
 // them there. No loaded settings source may disable hooks. Any failure refuses the
 // session before a request is sent.
+//
+// The acpx permission policy decides every tool call Claude Code would ask about:
+// the managed tier makes Claude Code ignore allow rules from every other source
+// (user, project, local, the settings file, allowedTools); deny and ask rules move
+// into it so they keep applying. Bypass mode is never offered.
 function assignClaudeCodeSettingIsolation(
   target: Record<string, unknown>,
   context: ClaudeSettingsContext,
 ): void {
   const settingSources = resolveClaudeCodeSettingSources(context.env);
   target.settingSources = settingSources;
+  let rulesSource: Record<string, unknown>;
   if (settingSources.includes("user")) {
-    requireClaudeUserSettingsHooks(context);
+    rulesSource = requireClaudeUserSettingsHooks(context);
   } else {
-    target.settings = loadClaudeCodeSettingsFile(
+    rulesSource = loadClaudeCodeSettingsFile(
       claudeCodeSettingsFilePath(context.home),
       context.isUsable,
     );
+    target.settings = rulesSource;
   }
+  target.managedSettings = claudeManagedPermissionSettings(rulesSource);
+  target.allowDangerouslySkipPermissions = false;
   assertClaudeHooksNotDisabled(claudeOtherSettingsFiles(context));
+}
+
+const LIFTED_PERMISSION_RULES = ["deny", "ask"] as const;
+
+function claudeManagedPermissionSettings(
+  settings: Record<string, unknown>,
+): Record<string, unknown> {
+  const permissions = isPlainObject(settings.permissions) ? settings.permissions : {};
+  const lifted: Record<string, string[]> = {};
+  for (const key of LIFTED_PERMISSION_RULES) {
+    const rules = permissions[key];
+    if (rules === undefined) {
+      continue;
+    }
+    if (!Array.isArray(rules) || !rules.every((rule) => typeof rule === "string")) {
+      throw refuse(`Claude settings permissions.${key} is not a list of rules`);
+    }
+    lifted[key] = [...rules];
+  }
+  return { allowManagedPermissionRulesOnly: true, permissions: lifted };
 }
 
 export function claudeCodeSettingsFilePath(home: string = os.homedir()): string {
@@ -359,35 +452,52 @@ function readSettingsJson(filePath: string, label: string): unknown {
   }
 }
 
-// Fail closed: a missing, unreadable or invalid file, or one that does not hold
-// exactly the egress hook contract with usable commands, refuses the session.
+// Keys a Claude settings file for acpx must not carry: they would let Claude Code
+// approve tool calls the acpx permission policy has not seen.
+const CLAUDE_SETTINGS_FILE_FORBIDDEN = ["permissions.allow", "permissions.defaultMode"] as const;
+
+function forbiddenClaudeSettings(settings: Record<string, unknown>): string[] {
+  const permissions = isPlainObject(settings.permissions) ? settings.permissions : {};
+  return CLAUDE_SETTINGS_FILE_FORBIDDEN.filter(
+    (key) => permissions[key.slice("permissions.".length)] !== undefined,
+  );
+}
+
+// Fail closed: a missing, unreadable or invalid file, one without the egress hook
+// contract (among its other settings) or one that carries allow rules or a default
+// permission mode refuses the session.
 export function loadClaudeCodeSettingsFile(
   filePath: string = claudeCodeSettingsFilePath(),
   isUsable: CommandCheck = isExecutableFile,
 ): Record<string, unknown> {
   const parsed = readSettingsJson(filePath, "Claude settings file");
-  const problems = claudeEgressContractViolations(parsed, true, isUsable);
+  const problems = claudeEgressContractViolations(parsed, false, isUsable);
   if (problems.length > 0) {
     throw refuse(
-      `Claude settings file does not hold the egress hook contract: ${filePath}: ${problems.join("; ")}. Built-in claude sessions without user settings require it; render it with \`liaison egress link --apply\``,
+      `Claude settings file does not carry the egress hook contract: ${filePath}: ${problems.join("; ")}. Claude sessions without user settings require it; render it with \`liaison acpx link --install\``,
     );
   }
-  return parsed as Record<string, unknown>;
+  const settings = parsed as Record<string, unknown>;
+  const forbidden = forbiddenClaudeSettings(settings);
+  if (forbidden.length > 0) {
+    throw refuse(
+      `Claude settings file sets ${forbidden.join(", ")}, which would approve tool calls without the acpx permission policy: ${filePath}`,
+    );
+  }
+  return settings;
 }
 
-function requireClaudeUserSettingsHooks(context: ClaudeSettingsContext): void {
+function requireClaudeUserSettingsHooks(context: ClaudeSettingsContext): Record<string, unknown> {
   const filePath = claudeUserSettingsFilePath(context.env, context.home);
   const label = "Claude user settings (ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1)";
-  const problems = claudeEgressContractViolations(
-    readSettingsJson(filePath, label),
-    false,
-    context.isUsable,
-  );
+  const parsed = readSettingsJson(filePath, label);
+  const problems = claudeEgressContractViolations(parsed, false, context.isUsable);
   if (problems.length > 0) {
     throw refuse(
       `${label} do not carry the egress hook contract: ${filePath}: ${problems.join("; ")}`,
     );
   }
+  return parsed as Record<string, unknown>;
 }
 
 // Project and local settings also load; either may disable hooks.

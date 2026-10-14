@@ -226,9 +226,18 @@ function parseAgentEntry(raw: unknown, name: string, sourcePath: string): Resolv
   if (!isObject(raw)) {
     throw new Error(`Invalid config agents.${name} in ${sourcePath}: expected object with command`);
   }
+  parseAgentFamily(raw.family, name, sourcePath);
   return Object.prototype.hasOwnProperty.call(raw, "argv")
     ? parseArgvAgentEntry(raw, name, sourcePath)
     : parseLegacyAgentEntry(raw, name, sourcePath);
+}
+
+// `family: "claude"` marks a launcher of the Claude Code ACP adapter; the client
+// reads it from the global config (src/acp/agent-command.ts).
+function parseAgentFamily(value: unknown, name: string, sourcePath: string): void {
+  if (value !== undefined && value !== "claude") {
+    throw new Error(`Invalid config agents.${name}.family in ${sourcePath}: expected "claude"`);
+  }
 }
 
 function parseArgvAgentEntry(
