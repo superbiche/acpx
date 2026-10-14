@@ -174,9 +174,10 @@ the session, and acpx sets `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SAFE_MODE`,
 environment whatever a launcher exported. Project configuration is read from the
 empty `~/.acpx/claude-project-config` directory (CLAUDE.md and `.claude/rules`
 still load from the session directory), the operator's skills and agents come
-from the `~/.acpx/claude-user-plugin` plugin when it exists, allow rules are
-ignored in favour of the acpx permission policy, and the session stays in Claude
-Code's `default` (or `plan`) permission mode. See the Settings isolation section
+from the `~/.acpx/claude-user-plugin` plugin when it exists, allow rules from
+settings are ignored in favour of the acpx permission policy (grant keys in
+delivered skill and agent frontmatter are not; see `agents/Claude.md`), and the
+session stays in Claude Code's `default` (or `plan`) permission mode. See the Settings isolation section
 of `agents/Claude.md`, which lists what these sessions load and what they do not.
 
 Other ACP-relevant behavior:

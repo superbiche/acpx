@@ -70,9 +70,12 @@ Skills and agents are delivered unfiltered: acpx does not read their
 frontmatter. A skill's `allowed-tools`, a skill's or agent's `hooks`, and an
 agent's `permissionMode` are passed to Claude Code as written, and Claude Code
 can use them to pre-approve tool calls without sending acpx a permission
-request. That pre-approval is Claude Code / adapter behavior, tracked
-upstream; `liaison acpx link --check` reports each delivered skill or agent
-that declares one of these keys.
+request. That pre-approval is Claude Code behavior, tracked upstream.
+`liaison acpx link --check` reports skills and agents whose frontmatter appears
+to declare one of these keys. The report is an advisory text match: it can miss
+unusual YAML forms (escaped, flow-style or explicit keys) and flag text that is
+not a grant, so zero findings is not proof that no delivered skill or agent
+declares one.
 
 What a Claude-family session loads, and what it does not:
 

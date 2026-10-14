@@ -1407,7 +1407,7 @@ test("loadClaudeUserPlugin delivers skills and agents as-is and refuses any othe
       skipMcpDiscovery: true,
     });
     // Frontmatter is not screened: grant keys are delivered unfiltered (the
-    // linker reports them; pre-approval is Claude Code / adapter behavior).
+    // linker reports them; pre-approval is Claude Code behavior).
     await writeUserPlugin(plugin("grants"), {
       skills: { writer: "allowed-tools: Write\n", hooked: "hooks:\n  Stop: []\n" },
       agents: { "a.md": "tools: Read\npermissionMode: acceptEdits\n" },
