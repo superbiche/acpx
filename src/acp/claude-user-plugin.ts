@@ -2,6 +2,7 @@ import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeSettingsUnavailableError } from "../errors.js";
+import { checkFrontmatter, type FrontmatterKind } from "./claude-frontmatter.js";
 
 // The operator's own Claude Code skills and agents reach Claude-family sessions as
 // one local plugin, ~/.acpx/claude-user-plugin, rendered by the operator's tooling
@@ -9,23 +10,15 @@ import { ClaudeSettingsUnavailableError } from "../errors.js";
 // A plugin can carry more than skills and agents (hooks, MCP and LSP servers,
 // commands, settings), and a skill or agent file can widen what the session may do
 // (allowed-tools approve tool calls without asking acpx; hooks can answer allow).
-// Only skills and agents without such keys are accepted; anything else refuses
-// the session, so a stale or hand-edited plugin never loads.
+// Only skills and agents whose frontmatter passes the allowlist of
+// claude-frontmatter.ts are accepted, read again at every session start through the
+// symlinks; anything else refuses the session, so a stale or hand-edited plugin
+// never loads.
 
 export type ClaudeUserPlugin = { type: "local"; path: string; skipMcpDiscovery: true };
 
 const PLUGIN_ENTRIES = new Set([".claude-plugin", "skills", "agents"]);
 const MANIFEST_KEYS = new Set(["name", "description", "version"]);
-// Frontmatter keys (compared lower-case, `_` read as `-`) that give a skill or an
-// agent tool approvals, hooks, servers or a permission mode of its own.
-const SKILL_FORBIDDEN_KEYS = new Set([
-  "allowed-tools",
-  "hooks",
-  "mcpservers",
-  "lspservers",
-  "agents",
-]);
-const AGENT_FORBIDDEN_KEYS = new Set(["hooks", "mcpservers", "permissionmode", "allowed-tools"]);
 
 export function claudeUserPluginPath(home: string = os.homedir()): string {
   return path.join(home, ".acpx", "claude-user-plugin");
@@ -38,48 +31,19 @@ function refuse(message: string, cause?: unknown): ClaudeSettingsUnavailableErro
   );
 }
 
-const FRONTMATTER_KEY = /^(?:"([^"]+)"|'([^']+)'|([^\s#:'"?{[][^:]*?))\s*:/;
-const UNCHECKABLE_KEY = /^[?{[]/;
-
-function frontmatterLineKey(line: string): string | undefined {
-  const match = FRONTMATTER_KEY.exec(line);
-  if (match) {
-    return (match[1] ?? match[2] ?? match[3] ?? "").trim();
-  }
-  // complex or flow-style keys cannot be checked; they are reported as they are
-  return UNCHECKABLE_KEY.test(line) ? line.trim() : undefined;
-}
-
-// Top-level keys of a Markdown file's leading YAML frontmatter.
-export function frontmatterKeys(text: string): string[] {
-  const lines = text.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") {
-    return [];
-  }
-  const keys: string[] = [];
-  for (const line of lines.slice(1)) {
-    if (line.trim() === "---") {
-      break;
-    }
-    const key = frontmatterLineKey(line);
-    if (key !== undefined) {
-      keys.push(key);
-    }
-  }
-  return keys;
-}
-
-function forbiddenKeys(file: string, forbidden: Set<string>): string[] {
+function checkFile(file: string, kind: FrontmatterKind, label: string): void {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch (error) {
     throw refuse(`Claude user plugin file is unreadable: ${file}`, error);
   }
-  return frontmatterKeys(text).filter((key) => {
-    const normalized = key.toLowerCase().replaceAll("_", "-");
-    return forbidden.has(normalized) || UNCHECKABLE_KEY.test(key);
-  });
+  const verdict = checkFrontmatter(text, kind);
+  if (!verdict.admitted) {
+    throw refuse(
+      `Claude user plugin ${label} frontmatter is outside the allowlist (${verdict.code}: ${verdict.detail})`,
+    );
+  }
 }
 
 function realDirectory(dir: string, label: string): void {
@@ -130,10 +94,7 @@ function checkSkills(dir: string): void {
     if (!stat.isDirectory() || !statSafe(file)?.isFile()) {
       throw refuse(`Claude user plugin skill is not a skill directory: ${skill}`);
     }
-    const keys = forbiddenKeys(file, SKILL_FORBIDDEN_KEYS);
-    if (keys.length > 0) {
-      throw refuse(`Claude user plugin skill ${name} declares ${keys.join(", ")}`);
-    }
+    checkFile(file, "skill", `skill ${name}`);
   }
 }
 
@@ -144,10 +105,7 @@ function checkAgents(dir: string): void {
     if (!name.endsWith(".md") || !statSafe(file)?.isFile()) {
       throw refuse(`Claude user plugin agent is not a Markdown file: ${file}`);
     }
-    const keys = forbiddenKeys(file, AGENT_FORBIDDEN_KEYS);
-    if (keys.length > 0) {
-      throw refuse(`Claude user plugin agent ${name} declares ${keys.join(", ")}`);
-    }
+    checkFile(file, "agent", `agent ${name}`);
   }
 }
 

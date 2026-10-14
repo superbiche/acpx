@@ -63,11 +63,18 @@ plugin, `~/.acpx/claude-user-plugin` (Liaison renders it: one symlink per skill
 directory, a copy of each agent file; Claude Code lists them as `user:<name>`).
 acpx loads it when it exists, with MCP discovery off, and refuses the session
 when it holds anything but a `.claude-plugin/plugin.json` manifest (name,
-description, version) and `skills/` and `agents/`, or when a skill's frontmatter
-declares `allowed-tools`, `hooks`, `mcpServers`, `lspServers` or `agents`, or an
-agent's declares `hooks`, `mcpServers`, `permissionMode` or `allowed-tools`: a
-skill's `allowed-tools` approve tool calls without asking acpx and its hooks can
-answer allow.
+description, version) and `skills/` and `agents/`, or when a skill's or an
+agent's frontmatter is outside an allowlist: a flat mapping in a plain YAML
+subset (keys in column 0; one-line plain, double-quoted without backslashes or
+single-quoted values, or `|`/`>` block scalars; comments), whose keys are only
+`name`, `description`, `when_to_use`, `argument-hint`, `user-invocable`,
+`disable-model-invocation`, `license` and `last_verified` for a skill, and
+`name` and `description` for an agent, with string values (booleans for the two
+invocation switches). Any other key, an indented or flow mapping, a quoted key,
+an anchor, alias, tag or merge key, a tab, carriage return or byte-order mark
+refuses the session: a skill's `allowed-tools` approve tool calls without asking
+acpx and its hooks can answer allow. The linked files are read again at every
+session start.
 
 What a Claude-family session loads, and what it does not:
 
@@ -75,7 +82,7 @@ What a Claude-family session loads, and what it does not:
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | Session directory `CLAUDE.md`, its imports, `.claude/rules`                                                                                                             | yes                                                                                    |
 | `~/.acpx/claude-settings.json` (derived settings: egress, guard and memory hooks, deny and ask rules)                                                                   | yes                                                                                    |
-| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, without the excluded frontmatter keys  |
+| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, when their frontmatter is allowlisted  |
 | Built-in skills and agents of Claude Code                                                                                                                               | yes                                                                                    |
 | User `CLAUDE.md` (`~/.claude/CLAUDE.md`) and its imports                                                                                                                | no                                                                                     |
 | User settings and everything else Claude Code reads from `~/.claude` through the user setting source (commands, output styles, rules), user-enabled marketplace plugins | no                                                                                     |

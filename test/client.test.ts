@@ -29,10 +29,11 @@ import {
   claudeEgressContractViolations,
 } from "../src/acp/claude-egress-contract.js";
 import {
-  claudeUserPluginPath,
-  frontmatterKeys,
-  loadClaudeUserPlugin,
-} from "../src/acp/claude-user-plugin.js";
+  checkFrontmatter,
+  plainType,
+  type FrontmatterKind,
+} from "../src/acp/claude-frontmatter.js";
+import { claudeUserPluginPath, loadClaudeUserPlugin } from "../src/acp/claude-user-plugin.js";
 import {
   AcpClient,
   buildAgentSpawnOptions,
@@ -1402,7 +1403,7 @@ test("loadClaudeUserPlugin accepts plain skills and agents and refuses anything 
     assert.equal(loadClaudeUserPlugin(home("absent")), undefined);
     await writeUserPlugin(plugin("plain"), {
       skills: { "my-inbox": "user-invocable: true\n", "_my:env": "" },
-      agents: { "coordinator.md": "tools: Read\ndisallowedTools: Bash\n" },
+      agents: { "coordinator.md": "description: d\n" },
     });
     assert.deepEqual(loadClaudeUserPlugin(home("plain")), {
       type: "local",
@@ -1427,7 +1428,36 @@ test("loadClaudeUserPlugin accepts plain skills and agents and refuses anything 
         /Allowed_Tools/,
       ],
       ["skill mcp", (d) => writeUserPlugin(d, { skills: { s: "mcpServers: {}\n" } }), /mcpServers/],
-      ["skill flow key", (d) => writeUserPlugin(d, { skills: { s: "{hooks: x}\n" } }), /\{hooks/],
+      ["skill flow key", (d) => writeUserPlugin(d, { skills: { s: "{hooks: x}\n" } }), /syntax/],
+      [
+        "skill indented allowed-tools",
+        (d) => writeUserPlugin(d, { skills: { s: "  allowed-tools: Write\n" } }),
+        /syntax/,
+      ],
+      [
+        "skill escaped key",
+        (d) => writeUserPlugin(d, { skills: { s: '"allowed\\u002Dtools": Write\n' } }),
+        /syntax/,
+      ],
+      [
+        "skill merge key",
+        (d) =>
+          writeUserPlugin(d, { skills: { s: "defaults: &g\n  allowed-tools: Write\n<<: *g\n" } }),
+        /key-not-allowed: defaults/,
+      ],
+      [
+        "agent indented mode",
+        (d) =>
+          writeUserPlugin(d, {
+            agents: { "a.md": "  description: d\n  permissionMode: acceptEdits\n" },
+          }),
+        /agent a\.md frontmatter is outside the allowlist \(syntax/,
+      ],
+      [
+        "agent tools",
+        (d) => writeUserPlugin(d, { agents: { "a.md": "tools: Read\n" } }),
+        /tools is not an allowed agent key/,
+      ],
       [
         "agent mode",
         (d) => writeUserPlugin(d, { agents: { "a.md": "permissionMode: acceptEdits\n" } }),
@@ -1532,13 +1562,67 @@ test("loadClaudeUserPlugin accepts plain skills and agents and refuses anything 
   }
 });
 
-test("frontmatterKeys reads the top-level keys of the leading frontmatter only", () => {
-  assert.deepEqual(
-    frontmatterKeys('---\nname: a\n"allowed-tools": x\nhooks:\n  Stop: []\n---\nk: v\n'),
-    ["name", "allowed-tools", "hooks"],
+// Shared with Liaison (tests/fixtures/claude-frontmatter-corpus.json), byte-identical;
+// the same digest is pinned in Liaison's tests/test_acpx_claude.py.
+const FRONTMATTER_CORPUS = path.resolve("test/fixtures/claude-frontmatter-corpus.json");
+const FRONTMATTER_CORPUS_SHA256 =
+  "08b37a1e3639ccdccb95bb3bdebf6766265f3262467844fe8887a1ab46f332c2";
+
+type FrontmatterCorpus = {
+  schema: string;
+  cases: Array<{
+    id: string;
+    kind: FrontmatterKind;
+    text: string;
+    verdict: "admit" | "exclude";
+    keys?: string[];
+    code?: string;
+  }>;
+  scenarios: Array<{ id: string; kind: FrontmatterKind; rendered: string; mutated: string }>;
+};
+
+async function readFrontmatterCorpus(): Promise<FrontmatterCorpus> {
+  const raw = await fs.readFile(FRONTMATTER_CORPUS);
+  assert.equal(
+    createHash("sha256").update(raw).digest("hex"),
+    FRONTMATTER_CORPUS_SHA256,
+    "the corpus is shared with Liaison: change both copies and both pins together",
   );
-  assert.deepEqual(frontmatterKeys("no frontmatter\nhooks: x\n"), []);
-  assert.deepEqual(frontmatterKeys("---\n{hooks: x}\n---\n"), ["{hooks: x}"]);
+  return JSON.parse(raw.toString("utf8")) as FrontmatterCorpus;
+}
+
+test("checkFrontmatter gives the shared corpus verdicts", async () => {
+  const corpus = await readFrontmatterCorpus();
+  assert.equal(corpus.schema, "claude-frontmatter-corpus/1");
+  for (const item of corpus.cases) {
+    const verdict = checkFrontmatter(item.text, item.kind);
+    if (item.verdict === "admit") {
+      assert.deepEqual(verdict, { admitted: true, keys: item.keys }, item.id);
+    } else {
+      assert.equal(verdict.admitted, false, item.id);
+      assert.equal(verdict.admitted ? undefined : verdict.code, item.code, item.id);
+    }
+  }
+  assert.equal(plainType("2026-05-12"), "string");
+  assert.equal(plainType("0x1F"), "number");
+});
+
+test("loadClaudeUserPlugin reads the linked skills again at every session start", async () => {
+  const corpus = await readFrontmatterCorpus();
+  const scenario = corpus.scenarios.find((item) => item.id === "stale-after-render");
+  assert(scenario);
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-stale-"));
+  try {
+    const plugin = claudeUserPluginPath(home);
+    await writeUserPlugin(plugin, { skills: { probe: "description: d\n" } });
+    const source = path.join(`${plugin}-library`, "probe", "SKILL.md");
+    await fs.writeFile(source, scenario.rendered);
+    assert.equal(loadClaudeUserPlugin(home)?.path, plugin);
+    await fs.writeFile(source, scenario.mutated); // changes behind the delivered symlink
+    assert.throws(() => loadClaudeUserPlugin(home), /skill probe frontmatter .*\(syntax/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
 
 test("AcpClient refuses a Claude session when the project configuration directory is not empty", async (t) => {
