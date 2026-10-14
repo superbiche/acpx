@@ -10,6 +10,7 @@ import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CLAUDE_CHILD_ENV_OVERRIDES } from "../src/acp/agent-command.js";
 import { isAcpJsonRpcMessage } from "../src/acp/jsonrpc.js";
 import type { PromptInput } from "../src/prompt-content.js";
 import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
@@ -1492,7 +1493,7 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             managedSettings: { allowManagedPermissionRulesOnly: true, permissions: {} },
             allowDangerouslySkipPermissions: false,
             projectConfigRoot: path.join(homeDir, ".acpx", "claude-project-config"),
-            env: { ACPX_CLAUDE_PROJECT_DIR: cwd },
+            env: { ...CLAUDE_CHILD_ENV_OVERRIDES, ACPX_CLAUDE_PROJECT_DIR: cwd },
           },
         },
       });

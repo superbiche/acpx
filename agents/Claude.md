@@ -26,12 +26,25 @@ carry the egress hooks of Liaison's declared hook contract (vendored in
 `src/acp/claude-egress-contract.ts`: five events, each with its script, timeout
 and failure policy, every command an absolute path to an executable file) among
 its other settings, and must not set `permissions.allow`,
-`permissions.defaultMode` or a hook-disabling environment switch in `env`. When
-it is missing, unreadable, not valid JSON, lacks a contract hook, or sets one of
-those keys, acpx refuses to create, load, or resume the session and sends no
-session request. acpx also refuses when the agent's environment sets
-`ACPX_CLAUDE_INCLUDE_USER_SETTINGS`, or `CLAUDE_CODE_SIMPLE` or
-`CLAUDE_CODE_SAFE_MODE` (both stop Claude Code from running settings hooks).
+`permissions.defaultMode`, or in `env` any of the switches below or
+`ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable, not valid JSON, lacks
+a contract hook, or sets one of those keys, acpx refuses to create, load, or
+resume the session and sends no session request. acpx also refuses when the
+agent's environment sets `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`, or
+`CLAUDE_CODE_SIMPLE` or `CLAUDE_CODE_SAFE_MODE` (both stop Claude Code from
+running settings hooks).
+
+A launcher (a wrapper script, or `CLAUDE_CODE_*` variables inherited by the
+adapter) can set variables acpx never sees. acpx therefore sets them in the
+Claude Code process environment itself, through the session options' `env`,
+which the adapter applies over its own environment: `CLAUDE_CODE_SIMPLE=0`,
+`CLAUDE_CODE_SAFE_MODE=0` (either would turn settings hooks off),
+`CLAUDE_CODE_SHELL_PREFIX=` (empty: it would run every hook command through a
+program of its choice), `CLAUDE_CODE_PLUGIN_DIRS=` (empty: it would load
+plugins, with their hooks, that acpx has not checked), and
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS=0` (it would drop the project instructions).
+The launcher itself stays trusted: one that replaces the adapter or the Claude
+Code executable (`CLAUDE_CODE_EXECUTABLE`) runs whatever it starts.
 
 Nothing the session directory carries is executed or trusted. Claude Code reads
 project configuration (`.claude/settings.json`, `.claude/settings.local.json`,
@@ -39,8 +52,36 @@ their hooks and permission rules, `.claude` skills, agents and commands, and
 `.mcp.json`) from `~/.acpx/claude-project-config`, an empty directory acpx
 creates and refuses to use when it is not empty or not a real directory.
 `CLAUDE.md`, its imports (such as `@AGENTS.md`) and `.claude/rules` still load
-from the session directory. Hooks see the empty directory as
-`CLAUDE_PROJECT_DIR`; the session directory is in `ACPX_CLAUDE_PROJECT_DIR`.
+from the session directory. Settings hooks start in the empty directory and see
+it as `CLAUDE_PROJECT_DIR`; acpx passes the session directory as
+`ACPX_CLAUDE_PROJECT_DIR`. The hooks Liaison renders run through a launcher that
+enters that directory and sets `CLAUDE_PROJECT_DIR` to it, and refuses to run
+the hook (exit 2) when it is unset, relative or missing.
+
+The operator's own skills and agents reach Claude-family sessions as one local
+plugin, `~/.acpx/claude-user-plugin` (Liaison renders it: one symlink per skill
+directory, a copy of each agent file; Claude Code lists them as `user:<name>`).
+acpx loads it when it exists, with MCP discovery off, and refuses the session
+when it holds anything but a `.claude-plugin/plugin.json` manifest (name,
+description, version) and `skills/` and `agents/`, or when a skill's frontmatter
+declares `allowed-tools`, `hooks`, `mcpServers`, `lspServers` or `agents`, or an
+agent's declares `hooks`, `mcpServers`, `permissionMode` or `allowed-tools`: a
+skill's `allowed-tools` approve tool calls without asking acpx and its hooks can
+answer allow.
+
+What a Claude-family session loads, and what it does not:
+
+| Surface                                                                                                                                                                 | Loaded                                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Session directory `CLAUDE.md`, its imports, `.claude/rules`                                                                                                             | yes                                                                                    |
+| `~/.acpx/claude-settings.json` (derived settings: egress, guard and memory hooks, deny and ask rules)                                                                   | yes                                                                                    |
+| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, without the excluded frontmatter keys  |
+| Built-in skills and agents of Claude Code                                                                                                                               | yes                                                                                    |
+| User `CLAUDE.md` (`~/.claude/CLAUDE.md`) and its imports                                                                                                                | no                                                                                     |
+| User settings and everything else Claude Code reads from `~/.claude` through the user setting source (commands, output styles, rules), user-enabled marketplace plugins | no                                                                                     |
+| `skillOverrides` and other skill-listing settings                                                                                                                       | no effect: Claude Code reads them only from the user, project and local settings files |
+| Repository `.claude` settings, hooks, permission rules, skills, agents, commands, `.mcp.json`                                                                           | no                                                                                     |
+| Plugins named by `CLAUDE_CODE_PLUGIN_DIRS`                                                                                                                              | no                                                                                     |
 
 The acpx permission policy (`--approve-all`, `--approve-reads`, `--deny-all`,
 `--permission-policy`) decides every tool call Claude Code would ask about:

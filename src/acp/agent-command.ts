@@ -9,6 +9,7 @@ import {
   type CommandCheck,
   isExecutableFile,
 } from "./claude-egress-contract.js";
+import { loadClaudeUserPlugin } from "./claude-user-plugin.js";
 import { basenameToken, splitCommandLine } from "./client-process.js";
 
 const DEFAULT_AGENT_CLOSE_AFTER_STDIN_END_MS = 100;
@@ -381,8 +382,14 @@ export function buildClaudeCodeOptionsMeta(
 //   configuration (.claude settings, hooks, skills, agents, commands, .mcp.json) from
 //   an empty acpx-owned directory instead of the session directory. CLAUDE.md,
 //   AGENTS.md imports and .claude/rules still load from the session directory.
-//   Hooks see that directory as CLAUDE_PROJECT_DIR; the real one is in
-//   ACPX_CLAUDE_PROJECT_DIR.
+//   Settings hooks run in, and see as CLAUDE_PROJECT_DIR, that empty directory; the
+//   session directory is passed as ACPX_CLAUDE_PROJECT_DIR for the hook commands to
+//   return to.
+// - the operator's own skills and agents come from ~/.acpx/claude-user-plugin when
+//   it exists (see claude-user-plugin.ts).
+// - the environment of the Claude Code process itself (whatever a launcher exported
+//   before starting the adapter) is overridden for the switches that turn settings
+//   hooks off, wrap them, add plugins or drop CLAUDE.md.
 function assignClaudeCodeSettingIsolation(
   target: Record<string, unknown>,
   context: ClaudeSettingsContext,
@@ -398,9 +405,14 @@ function assignClaudeCodeSettingIsolation(
   target.managedSettings = claudeManagedPermissionSettings(settings);
   target.allowDangerouslySkipPermissions = false;
   target.projectConfigRoot = ensureClaudeProjectConfigRoot(context.home);
-  if (context.cwd) {
-    target.env = { [CLAUDE_PROJECT_DIR_ENV]: context.cwd };
+  const plugin = loadClaudeUserPlugin(context.home);
+  if (plugin) {
+    target.plugins = [plugin];
   }
+  target.env = {
+    ...CLAUDE_CHILD_ENV_OVERRIDES,
+    ...(context.cwd ? { [CLAUDE_PROJECT_DIR_ENV]: context.cwd } : {}),
+  };
 }
 
 export const CLAUDE_PROJECT_DIR_ENV = "ACPX_CLAUDE_PROJECT_DIR";
@@ -458,6 +470,21 @@ export function ensureClaudeProjectConfigRoot(home: string = os.homedir()): stri
 // Launch-environment switches that stop Claude Code from running settings-file
 // hooks (and with them the egress hooks), or that bring back the user settings.
 const CLAUDE_HOOK_SURFACE_SWITCHES = ["CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE"] as const;
+
+// Values the Claude Code process gets whatever its launcher exported. The adapter
+// builds the process environment as its own environment overlaid with the session
+// options' env, so these reach the process even when a wrapper script set them.
+// CLAUDE_CODE_SIMPLE / CLAUDE_CODE_SAFE_MODE turn settings hooks off,
+// CLAUDE_CODE_SHELL_PREFIX runs every hook command through a program of its choice,
+// CLAUDE_CODE_PLUGIN_DIRS loads plugins (with their hooks) acpx has not checked,
+// CLAUDE_CODE_DISABLE_CLAUDE_MDS drops the project instructions.
+export const CLAUDE_CHILD_ENV_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  CLAUDE_CODE_SIMPLE: "0",
+  CLAUDE_CODE_SAFE_MODE: "0",
+  CLAUDE_CODE_SHELL_PREFIX: "",
+  CLAUDE_CODE_PLUGIN_DIRS: "",
+  CLAUDE_CODE_DISABLE_CLAUDE_MDS: "0",
+});
 const CLAUDE_INCLUDE_USER_SETTINGS_ENV = "ACPX_CLAUDE_INCLUDE_USER_SETTINGS";
 
 function isSwitchSet(value: string | undefined): boolean {
@@ -509,7 +536,11 @@ function forbiddenClaudeSettings(settings: Record<string, unknown>): string[] {
     (key) => permissions[key.slice("permissions.".length)] !== undefined,
   );
   const env = isPlainObject(settings.env) ? settings.env : {};
-  for (const name of [...CLAUDE_HOOK_SURFACE_SWITCHES, CLAUDE_INCLUDE_USER_SETTINGS_ENV]) {
+  for (const name of [
+    ...Object.keys(CLAUDE_CHILD_ENV_OVERRIDES),
+    CLAUDE_PROJECT_DIR_ENV,
+    CLAUDE_INCLUDE_USER_SETTINGS_ENV,
+  ]) {
     if (env[name] !== undefined) {
       forbidden.push(`env.${name}`);
     }

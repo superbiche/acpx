@@ -18,6 +18,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import {
+  CLAUDE_CHILD_ENV_OVERRIDES,
   claudeCodeSettingsFilePath,
   claudeProjectConfigRootPath,
   loadClaudeCodeSettingsFile,
@@ -27,6 +28,11 @@ import {
   CLAUDE_EGRESS_CONTRACT_DIGEST,
   claudeEgressContractViolations,
 } from "../src/acp/claude-egress-contract.js";
+import {
+  claudeUserPluginPath,
+  frontmatterKeys,
+  loadClaudeUserPlugin,
+} from "../src/acp/claude-user-plugin.js";
 import {
   AcpClient,
   buildAgentSpawnOptions,
@@ -71,7 +77,7 @@ function claudeIsolationOptions(cwd: string = META_CWD): Record<string, unknown>
     managedSettings: CLAUDE_PERMISSION_LOCK,
     allowDangerouslySkipPermissions: false,
     projectConfigRoot: path.join(scratchHome, ".acpx", "claude-project-config"),
-    env: { ACPX_CLAUDE_PROJECT_DIR: cwd },
+    env: { ...CLAUDE_CHILD_ENV_OVERRIDES, ACPX_CLAUDE_PROJECT_DIR: cwd },
   };
 }
 const originalHome = process.env.HOME;
@@ -1293,6 +1299,248 @@ test("AcpClient keeps Claude project configuration out of the session directory"
   assert.deepEqual(await fs.readdir(root), []);
 });
 
+test("AcpClient overrides the hook switches in the Claude Code process environment", async (t) => {
+  // A launcher script can export these after acpx checked its own environment; the
+  // adapter overlays the session options' env on its environment, so the values
+  // acpx sends are what the Claude Code process sees.
+  assert.deepEqual(CLAUDE_CHILD_ENV_OVERRIDES, {
+    CLAUDE_CODE_SIMPLE: "0",
+    CLAUDE_CODE_SAFE_MODE: "0",
+    CLAUDE_CODE_SHELL_PREFIX: "",
+    CLAUDE_CODE_PLUGIN_DIRS: "",
+    CLAUDE_CODE_DISABLE_CLAUDE_MDS: "0",
+  });
+  for (const method of ["create", "load", "resume"] as const) {
+    const fixture = createClientFixture(t, {
+      client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+    });
+    const pending = openClaudeSessionIn(fixture, method);
+    const request = await fixture.message(0);
+    assert("method" in request);
+    const params = request.params as { _meta: { claudeCode: { options: { env: unknown } } } };
+    assert.deepEqual(params._meta.claudeCode.options.env, {
+      ...CLAUDE_CHILD_ENV_OVERRIDES,
+      ACPX_CLAUDE_PROJECT_DIR: META_CWD,
+    });
+    await fixture.reply(request, { sessionId: "session-meta", modes: DEFAULT_MODE_STATE });
+    await pending;
+  }
+});
+
+test("AcpClient delivers the user plugin to Claude-family sessions", async (t) => {
+  const plugin = claudeUserPluginPath(scratchHome);
+  t.after(async () => {
+    await fs.rm(plugin, { recursive: true, force: true });
+  });
+  await writeUserPlugin(plugin, { skills: { "my-inbox": "description: d\n" } });
+  const fixture = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  const pending = fixture.track(fixture.client.createSession(META_CWD));
+  const request = await fixture.message(0);
+  assert("method" in request);
+  assert.deepEqual(request.params, {
+    cwd: META_CWD,
+    mcpServers: [],
+    _meta: {
+      claudeCode: {
+        options: {
+          ...claudeIsolationOptions(),
+          plugins: [{ type: "local", path: plugin, skipMcpDiscovery: true }],
+        },
+      },
+    },
+  });
+  await fixture.reply(request, { sessionId: "s", modes: DEFAULT_MODE_STATE });
+  await pending;
+
+  await fs.rm(plugin, { recursive: true, force: true });
+  await writeUserPlugin(plugin, { skills: { approver: "allowed-tools: Bash(*)\n" } });
+  const refused = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  await assert.rejects(refused.client.createSession(META_CWD), /allowed-tools/);
+  assert.equal(refused.messages.length, 0, "no session request may be sent");
+});
+
+async function writeUserPlugin(
+  dir: string,
+  content: {
+    skills?: Record<string, string>;
+    agents?: Record<string, string>;
+    manifest?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await fs.mkdir(path.join(dir, ".claude-plugin"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, ".claude-plugin", "plugin.json"),
+    JSON.stringify(content.manifest ?? { name: "user", description: "d" }),
+  );
+  const library = `${dir}-library`;
+  for (const [name, front] of Object.entries(content.skills ?? {})) {
+    await fs.mkdir(path.join(library, name), { recursive: true });
+    await fs.writeFile(
+      path.join(library, name, "SKILL.md"),
+      `---\nname: ${name}\n${front}---\nbody\n`,
+    );
+    await fs.mkdir(path.join(dir, "skills"), { recursive: true });
+    await fs.symlink(path.join(library, name), path.join(dir, "skills", name));
+  }
+  for (const [name, front] of Object.entries(content.agents ?? {})) {
+    await fs.mkdir(library, { recursive: true });
+    await fs.writeFile(path.join(library, name), `---\nname: a\n${front}---\nbody\n`);
+    await fs.mkdir(path.join(dir, "agents"), { recursive: true });
+    await fs.symlink(path.join(library, name), path.join(dir, "agents", name));
+  }
+}
+
+test("loadClaudeUserPlugin accepts plain skills and agents and refuses anything else", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-plugin-"));
+  try {
+    const home = (name: string) => path.join(root, name);
+    const plugin = (name: string) => claudeUserPluginPath(home(name));
+    assert.equal(loadClaudeUserPlugin(home("absent")), undefined);
+    await writeUserPlugin(plugin("plain"), {
+      skills: { "my-inbox": "user-invocable: true\n", "_my:env": "" },
+      agents: { "coordinator.md": "tools: Read\ndisallowedTools: Bash\n" },
+    });
+    assert.deepEqual(loadClaudeUserPlugin(home("plain")), {
+      type: "local",
+      path: plugin("plain"),
+      skipMcpDiscovery: true,
+    });
+    // [home, how the plugin is made, expected refusal]
+    const refusals: Array<[string, (dir: string) => Promise<void>, RegExp]> = [
+      [
+        "skill allowed-tools",
+        (d) => writeUserPlugin(d, { skills: { s: "allowed-tools: Write\n" } }),
+        /allowed-tools/,
+      ],
+      [
+        "skill hooks",
+        (d) => writeUserPlugin(d, { skills: { s: "hooks:\n  Stop: []\n" } }),
+        /hooks/,
+      ],
+      [
+        "skill spelling",
+        (d) => writeUserPlugin(d, { skills: { s: "Allowed_Tools: Write\n" } }),
+        /Allowed_Tools/,
+      ],
+      ["skill mcp", (d) => writeUserPlugin(d, { skills: { s: "mcpServers: {}\n" } }), /mcpServers/],
+      ["skill flow key", (d) => writeUserPlugin(d, { skills: { s: "{hooks: x}\n" } }), /\{hooks/],
+      [
+        "agent mode",
+        (d) => writeUserPlugin(d, { agents: { "a.md": "permissionMode: acceptEdits\n" } }),
+        /permissionMode/,
+      ],
+      ["agent hooks", (d) => writeUserPlugin(d, { agents: { "a.md": "hooks: {}\n" } }), /hooks/],
+      [
+        "agent not markdown",
+        (d) => writeUserPlugin(d, { agents: { "a.txt": "" } }),
+        /not a Markdown/,
+      ],
+      [
+        "manifest hooks",
+        (d) => writeUserPlugin(d, { manifest: { name: "user", hooks: "./h.json" } }),
+        /declares hooks/,
+      ],
+      [
+        "manifest without name",
+        (d) => writeUserPlugin(d, { manifest: { description: "d" } }),
+        /with a name/,
+      ],
+      [
+        "plugin hooks dir",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.mkdir(path.join(d, "hooks"));
+        },
+        /found hooks/,
+      ],
+      [
+        "plugin mcp file",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.writeFile(path.join(d, ".mcp.json"), "{}");
+        },
+        /found \.mcp\.json/,
+      ],
+      [
+        "manifest dir extra file",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.writeFile(path.join(d, ".claude-plugin", "marketplace.json"), "{}");
+        },
+        /only plugin\.json/,
+      ],
+      [
+        "skill without SKILL.md",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.mkdir(path.join(d, "skills", "empty"), { recursive: true });
+        },
+        /not a skill directory/,
+      ],
+      [
+        "dangling skill link",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.mkdir(path.join(d, "skills"));
+          await fs.symlink(path.join(root, "nowhere"), path.join(d, "skills", "gone"));
+        },
+        /points nowhere/,
+      ],
+      [
+        "symlinked skills directory",
+        async (d) => {
+          await writeUserPlugin(d, {});
+          await fs.symlink(root, path.join(d, "skills"));
+        },
+        /not a real directory/,
+      ],
+      [
+        "symlinked plugin",
+        async (d) => {
+          await fs.mkdir(path.dirname(d), { recursive: true });
+          await fs.symlink(plugin("plain"), d);
+        },
+        /not a real directory/,
+      ],
+      [
+        "no manifest",
+        async (d) => {
+          await fs.mkdir(path.join(d, "skills"), { recursive: true });
+        },
+        /no manifest/,
+      ],
+    ];
+    for (const [name, make, message] of refusals) {
+      const id = name.replaceAll(" ", "-");
+      await make(plugin(id));
+      assert.throws(
+        () => loadClaudeUserPlugin(home(id)),
+        (error: unknown) => {
+          assert(error instanceof ClaudeSettingsUnavailableError, name);
+          assert.match(error.message, message, name);
+          return true;
+        },
+        name,
+      );
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("frontmatterKeys reads the top-level keys of the leading frontmatter only", () => {
+  assert.deepEqual(
+    frontmatterKeys('---\nname: a\n"allowed-tools": x\nhooks:\n  Stop: []\n---\nk: v\n'),
+    ["name", "allowed-tools", "hooks"],
+  );
+  assert.deepEqual(frontmatterKeys("no frontmatter\nhooks: x\n"), []);
+  assert.deepEqual(frontmatterKeys("---\n{hooks: x}\n---\n"), ["{hooks: x}"]);
+});
+
 test("AcpClient refuses a Claude session when the project configuration directory is not empty", async (t) => {
   const root = claudeProjectConfigRootPath(scratchHome);
   t.after(async () => {
@@ -1543,6 +1791,25 @@ test("Claude settings file loader reads the fixed acpx path and validates it", a
       [
         "safe mode",
         JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { CLAUDE_CODE_SAFE_MODE: "1" } }),
+      ],
+      [
+        "shell prefix",
+        JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { CLAUDE_CODE_SHELL_PREFIX: "/x" } }),
+      ],
+      [
+        "plugin dirs",
+        JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { CLAUDE_CODE_PLUGIN_DIRS: "/x" } }),
+      ],
+      [
+        "no CLAUDE.md",
+        JSON.stringify({
+          ...CLAUDE_SETTINGS_FIXTURE,
+          env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" },
+        }),
+      ],
+      [
+        "project dir",
+        JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { ACPX_CLAUDE_PROJECT_DIR: "/x" } }),
       ],
     ] as const) {
       const file = path.join(dir, `${name}.json`);
