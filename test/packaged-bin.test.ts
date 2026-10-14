@@ -181,7 +181,7 @@ test("packaged registry imports without runtime dependencies or agent execution"
         childProcess[name] = () => { throw new Error('Unexpected process execution'); };
       }
       syncBuiltinESMExports();
-      const { createAgentRegistry } = await import('acpx/agent-registry');
+      const { createAgentRegistry } = await import('@superbiche/acpx/agent-registry');
       const registry = createAgentRegistry({ resolveExecutable: () => undefined, resolvePackageRoot: () => undefined });
       assert.equal(registry.inspect('qwen').launch.kind, 'missing');
       assert.ok(registry.list().includes('pi'));
