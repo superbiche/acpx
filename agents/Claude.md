@@ -62,19 +62,17 @@ The operator's own skills and agents reach Claude-family sessions as one local
 plugin, `~/.acpx/claude-user-plugin` (Liaison renders it: one symlink per skill
 directory, a copy of each agent file; Claude Code lists them as `user:<name>`).
 acpx loads it when it exists, with MCP discovery off, and refuses the session
-when it holds anything but a `.claude-plugin/plugin.json` manifest (name,
-description, version) and `skills/` and `agents/`, or when a skill's or an
-agent's frontmatter is outside an allowlist: a flat mapping in a plain YAML
-subset (keys in column 0; one-line plain, double-quoted without backslashes or
-single-quoted values, or `|`/`>` block scalars; comments), whose keys are only
-`name`, `description`, `when_to_use`, `argument-hint`, `user-invocable`,
-`disable-model-invocation`, `license` and `last_verified` for a skill, and
-`name` and `description` for an agent, with string values (booleans for the two
-invocation switches). Any other key, an indented or flow mapping, a quoted key,
-an anchor, alias, tag or merge key, a tab, carriage return or byte-order mark
-refuses the session: a skill's `allowed-tools` approve tool calls without asking
-acpx and its hooks can answer allow. The linked files are read again at every
-session start.
+when the plugin itself is a symlink or holds anything but a
+`.claude-plugin/plugin.json` manifest (name, description, version) and
+`skills/` and `agents/`. This structure is checked again at every session start.
+
+Skills and agents are delivered unfiltered: acpx does not read their
+frontmatter. A skill's `allowed-tools`, a skill's or agent's `hooks`, and an
+agent's `permissionMode` are passed to Claude Code as written, and Claude Code
+can use them to pre-approve tool calls without sending acpx a permission
+request. That pre-approval is Claude Code / adapter behavior, tracked
+upstream; `liaison acpx link --check` reports each delivered skill or agent
+that declares one of these keys.
 
 What a Claude-family session loads, and what it does not:
 
@@ -82,7 +80,7 @@ What a Claude-family session loads, and what it does not:
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | Session directory `CLAUDE.md`, its imports, `.claude/rules`                                                                                                             | yes                                                                                    |
 | `~/.acpx/claude-settings.json` (derived settings: egress, guard and memory hooks, deny and ask rules)                                                                   | yes                                                                                    |
-| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, when their frontmatter is allowlisted  |
+| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, unfiltered (grant keys included)       |
 | Built-in skills and agents of Claude Code                                                                                                                               | yes                                                                                    |
 | User `CLAUDE.md` (`~/.claude/CLAUDE.md`) and its imports                                                                                                                | no                                                                                     |
 | User settings and everything else Claude Code reads from `~/.claude` through the user setting source (commands, output styles, rules), user-enabled marketplace plugins | no                                                                                     |
@@ -109,7 +107,8 @@ The acpx permission policy (`--approve-all`, `--approve-reads`, `--deny-all`,
   for an auto-approving mode.
 
 Claude Code ignores a parent-supplied managed tier when an administrator's
-managed settings exist on the machine.
+managed settings exist on the machine. Tool calls pre-approved by a delivered
+skill's or agent's grant keys (see the user plugin above) do not reach acpx.
 
 On Windows, native Claude executable discovery resolves relative `PATH` entries
 from the selected session cwd. An explicit `CLAUDE_CODE_EXECUTABLE` still takes
