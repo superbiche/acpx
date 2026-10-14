@@ -213,7 +213,7 @@ test("packaged registry imports without runtime dependencies or agent execution"
         };
       }
       syncBuiltinESMExports();
-      const { createAgentRegistry } = await import('acpx/agent-registry');
+      const { createAgentRegistry } = await import('@superbiche/acpx/agent-registry');
       const registry = createAgentRegistry({
         resolveExecutable: command => ['opencode', 'pi'].includes(command) ? path.resolve('bin', command) : undefined,
       });
