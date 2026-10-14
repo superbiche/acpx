@@ -48,6 +48,7 @@ import {
   AgentStartupError,
   AuthPolicyError,
   ClaudeAcpSessionCreateTimeoutError,
+  ClaudePermissionModeLockedError,
   ClaudeSettingsUnavailableError,
   GeminiAcpStartupTimeoutError,
   PermissionDeniedError,
@@ -270,6 +271,53 @@ function normalizeConfigOptionAcknowledgement(
 }
 
 const CLAUDE_DEFAULT_MODE_ID = "default";
+// Permission modes a Claude-family session may be in. Neither approves a tool call
+// the acpx permission policy has not seen; plan mode only narrows "default".
+const CLAUDE_PERMITTED_MODE_IDS: ReadonlySet<string> = new Set([CLAUDE_DEFAULT_MODE_ID, "plan"]);
+const CLAUDE_MODE_CONFIG_ID = "mode";
+
+function modeConfigValue(configOptions: unknown): string | undefined {
+  if (!Array.isArray(configOptions)) {
+    return undefined;
+  }
+  const option: unknown = configOptions.find(
+    (candidate: unknown) => isRecordValue(candidate) && candidate.id === CLAUDE_MODE_CONFIG_ID,
+  );
+  return isRecordValue(option) && typeof option.currentValue === "string"
+    ? option.currentValue
+    : undefined;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function claudeModeFromSessionUpdate(update: unknown): string | undefined {
+  if (!isRecordValue(update)) {
+    return undefined;
+  }
+  if (update.sessionUpdate === "current_mode_update") {
+    return typeof update.currentModeId === "string" ? update.currentModeId : undefined;
+  }
+  return update.sessionUpdate === "config_option_update"
+    ? modeConfigValue(update.configOptions)
+    : undefined;
+}
+
+// A Claude-family session never picks an option that persists a rule or changes the
+// permission mode (the "allow always" kinds, which include every ExitPlanMode choice
+// that leaves plan mode for auto, bypass or accept-edits): when a one-time approval is
+// offered, only that one stays selectable.
+export function restrictClaudeFamilyPermissionOptions(
+  params: RequestPermissionRequest,
+): RequestPermissionRequest {
+  const options = params.options ?? [];
+  if (!options.some((option) => option.kind === "allow_once")) {
+    return params;
+  }
+  const kept = options.filter((option) => option.kind !== "allow_always");
+  return kept.length === options.length ? params : { ...params, options: kept };
+}
 
 function reportedModeId(response: unknown): string | undefined {
   if (!response || typeof response !== "object") {
@@ -422,6 +470,8 @@ export class AcpClient {
   private readonly agentCleanups = new WeakMap<ChildProcess, Promise<void>>();
   private readonly commandProbes = new Set<ChildProcess>();
   private initResult?: InitializeResponse;
+  private agentLaunchEnv?: NodeJS.ProcessEnv;
+  private readonly claudeModeViolations = new Map<string, ClaudePermissionModeLockedError>();
   private loadedSessionId?: string;
   private eventHandlers: Pick<
     AcpClientOptions,
@@ -761,6 +811,7 @@ export class AcpClient {
       this.options.sessionOptions?.env,
       this.options.agentProcessEnv,
     );
+    this.agentLaunchEnv = spawnOptions.env;
     const commandContext: AgentLaunchPlan["commandContext"] = {
       env: spawnOptions.env,
       readOutput: async (command, args, timeoutMs, diagnostic = false) => {
@@ -1189,7 +1240,10 @@ export class AcpClient {
   }
 
   private sessionMeta(cwd: string): Record<string, unknown> | undefined {
-    return buildClaudeCodeOptionsMeta(this.options.sessionOptions, this.isClaudeFamily(), { cwd });
+    return buildClaudeCodeOptionsMeta(this.options.sessionOptions, this.isClaudeFamily(), {
+      cwd,
+      env: this.agentLaunchEnv,
+    });
   }
 
   // Claude Code starts a session in the user's permissions.defaultMode, which the
@@ -1212,6 +1266,43 @@ export class AcpClient {
         { cause: error },
       );
     }
+  }
+
+  // Every mode change acpx sends (set-mode, the mode config option, a persisted or
+  // replayed selection, a queue owner's control request) passes here.
+  private assertClaudeModePermitted(modeId: string, via: string): void {
+    if (!this.isClaudeFamily() || CLAUDE_PERMITTED_MODE_IDS.has(modeId)) {
+      return;
+    }
+    throw new ClaudePermissionModeLockedError(
+      `Claude-family sessions stay in the "${CLAUDE_DEFAULT_MODE_ID}" permission mode (or "plan"), so that the acpx permission policy decides every tool call; refusing ${via} "${modeId}".`,
+    );
+  }
+
+  // A mode the agent switches to by itself during a turn (a tool such as
+  // ExitPlanMode, or anything else) that is not permitted cancels the turn and
+  // fails the prompt.
+  private watchClaudeModeChange(notification: SessionNotification): void {
+    const modeId = claudeModeFromSessionUpdate(notification.update);
+    if (
+      modeId === undefined ||
+      CLAUDE_PERMITTED_MODE_IDS.has(modeId) ||
+      this.activePrompt?.sessionId !== notification.sessionId ||
+      !this.isClaudeFamily()
+    ) {
+      return;
+    }
+    if (!this.claudeModeViolations.has(notification.sessionId)) {
+      this.claudeModeViolations.set(
+        notification.sessionId,
+        new ClaudePermissionModeLockedError(
+          `Claude session ${notification.sessionId} switched itself to the "${modeId}" permission mode during the turn; the turn was cancelled.`,
+        ),
+      );
+    }
+    void this.cancel(notification.sessionId).catch(() => {
+      // The violation is reported when the prompt settles.
+    });
   }
 
   async createSession(
@@ -1508,6 +1599,11 @@ export class AcpClient {
   }
 
   private throwPromptPermissionFailureIfPresent(sessionId: string): void {
+    const modeViolation = this.claudeModeViolations.get(sessionId);
+    if (modeViolation) {
+      this.claudeModeViolations.delete(sessionId);
+      throw modeViolation;
+    }
     const permissionFailure = this.consumePromptPermissionFailure(sessionId);
     if (permissionFailure) {
       throw permissionFailure;
@@ -1519,6 +1615,7 @@ export class AcpClient {
     modeId: string,
     authority?: AcpControlAuthority,
   ): Promise<void> {
+    this.assertClaudeModePermitted(modeId, "session/set_mode");
     const connection = this.getConnection();
     await this.runConnectionRequest(
       () =>
@@ -1539,6 +1636,9 @@ export class AcpClient {
     authority?: AcpControlAuthority,
   ): Promise<SetSessionConfigOptionResponse> {
     assertControlAuthority(authority);
+    if (configId === CLAUDE_MODE_CONFIG_ID) {
+      this.assertClaudeModePermitted(value, `session/set_config_option ${configId}`);
+    }
     const resolvedValue =
       models?.configId === configId ? this.resolveSessionModelId(value, models) : value;
     const connection = this.getConnection();
@@ -2238,10 +2338,15 @@ export class AcpClient {
       return this.finishPermissionRequest(params, owner, response);
     }
 
+    const offered = this.offeredPermissionOptions(params);
     const response =
-      (await this.tryHandlePermissionRequestWithHost(params, owner)) ??
-      (await this.resolvePermissionRequestFromMode(params, owner));
-    return this.finishPermissionRequest(params, owner, response);
+      (await this.tryHandlePermissionRequestWithHost(offered, owner)) ??
+      (await this.resolvePermissionRequestFromMode(offered, owner));
+    return this.finishPermissionRequest(offered, owner, response);
+  }
+
+  private offeredPermissionOptions(params: RequestPermissionRequest): RequestPermissionRequest {
+    return this.isClaudeFamily() ? restrictClaudeFamilyPermissionOptions(params) : params;
   }
 
   private finishPermissionRequest(
@@ -2834,6 +2939,7 @@ export class AcpClient {
     const sequence = ++this.observedSessionUpdates;
     this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
       try {
+        this.watchClaudeModeChange(notification);
         if (!this.suppressSessionUpdates) {
           this.eventHandlers.onSessionUpdate?.(notification);
         }

@@ -207,6 +207,18 @@ export class ClaudeSettingsUnavailableError extends AcpxOperationalError {
   }
 }
 
+export class ClaudePermissionModeLockedError extends AcpxOperationalError {
+  constructor(message: string, options?: AcpxErrorOptions) {
+    super(message, {
+      outputCode: "RUNTIME",
+      detailCode: "CLAUDE_PERMISSION_MODE_LOCKED",
+      origin: "cli",
+      retryable: false,
+      ...options,
+    });
+  }
+}
+
 export class CopilotAcpUnsupportedError extends AcpxOperationalError {
   constructor(message: string, options?: AcpxErrorOptions) {
     super(message, {

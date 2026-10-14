@@ -1491,6 +1491,8 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             settings: claudeSettings,
             managedSettings: { allowManagedPermissionRulesOnly: true, permissions: {} },
             allowDangerouslySkipPermissions: false,
+            projectConfigRoot: path.join(homeDir, ".acpx", "claude-project-config"),
+            env: { ACPX_CLAUDE_PROJECT_DIR: cwd },
           },
         },
       });
@@ -1498,6 +1500,46 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
         | { params?: { modeId?: unknown } }
         | undefined;
       assert.equal(setMode?.params?.modeId, "default", "a Claude session is put in default mode");
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+test("integration: exec refuses to move a Claude session out of the default permission mode", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+    const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
+    await writeClaudeSettings(homeDir);
+
+    try {
+      const result = await runCli(
+        [
+          "--agent",
+          claudeCompatibleAgentCommand,
+          "--deny-all",
+          "--cwd",
+          cwd,
+          "--format",
+          "json",
+          "exec",
+          "--config-option",
+          "mode=acceptEdits",
+          "echo hello",
+        ],
+        homeDir,
+      );
+      assert.notEqual(result.code, 0, result.stdout);
+      const payloads = parseJsonRpcOutputLines(result.stdout);
+      assert.equal(
+        payloads.some(
+          (payload) =>
+            payload.method === "session/set_config_option" || payload.method === "session/prompt",
+        ),
+        false,
+        result.stdout,
+      );
+      assert.match(result.stdout + result.stderr, /permission mode/);
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }

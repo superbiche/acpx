@@ -19,7 +19,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import {
   claudeCodeSettingsFilePath,
-  claudeUserSettingsFilePath,
+  claudeProjectConfigRootPath,
   loadClaudeCodeSettingsFile,
 } from "../src/acp/agent-command.js";
 import {
@@ -33,6 +33,7 @@ import {
   buildQoderAcpCommandArgs,
   parseAcpJsonMessageLine,
   resolveClaudeCodeSettingSources,
+  restrictClaudeFamilyPermissionOptions,
   resolveAgentCloseAfterStdinEndMs,
   shouldIgnoreNonJsonAgentOutputLine,
 } from "../src/acp/client.js";
@@ -41,6 +42,7 @@ import {
   AgentSpawnError,
   AgentStartupError,
   AuthPolicyError,
+  ClaudePermissionModeLockedError,
   ClaudeSettingsUnavailableError,
   PermissionDeniedError,
   PermissionPromptUnavailableError,
@@ -59,6 +61,19 @@ const scratchHome = mkdtempSync(path.join(os.tmpdir(), "acpx-client-home-"));
 const CLAUDE_SETTINGS_FIXTURE = claudeEgressSettings(path.join(scratchHome, "egress-hooks"));
 const CLAUDE_PERMISSION_LOCK = { allowManagedPermissionRulesOnly: true, permissions: {} };
 const DEFAULT_MODE_STATE = { currentModeId: "default", availableModes: [] };
+const META_CWD = path.resolve("/tmp/acpx-client-meta");
+
+// The Claude Code options acpx sends for every Claude-family session in `cwd`.
+function claudeIsolationOptions(cwd: string = META_CWD): Record<string, unknown> {
+  return {
+    settingSources: ["project", "local"],
+    settings: CLAUDE_SETTINGS_FIXTURE,
+    managedSettings: CLAUDE_PERMISSION_LOCK,
+    allowDangerouslySkipPermissions: false,
+    projectConfigRoot: path.join(scratchHome, ".acpx", "claude-project-config"),
+    env: { ACPX_CLAUDE_PROJECT_DIR: cwd },
+  };
+}
 const originalHome = process.env.HOME;
 
 before(async () => {
@@ -1043,16 +1058,7 @@ for (const scenario of [
   {
     name: "AcpClient creates built-in Claude sessions without user settings by default",
     options: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
-    meta: {
-      claudeCode: {
-        options: {
-          settingSources: ["project", "local"],
-          settings: CLAUDE_SETTINGS_FIXTURE,
-          managedSettings: CLAUDE_PERMISSION_LOCK,
-          allowDangerouslySkipPermissions: false,
-        },
-      },
-    },
+    meta: { claudeCode: { options: claudeIsolationOptions() } },
   },
   {
     name: "AcpClient createSession forwards systemPrompt string in _meta",
@@ -1115,14 +1121,7 @@ for (const method of ["load", "resume"] as const) {
       mcpServers: [],
       _meta: {
         claudeCode: {
-          options: {
-            settingSources: ["project", "local"],
-            settings: CLAUDE_SETTINGS_FIXTURE,
-            managedSettings: CLAUDE_PERMISSION_LOCK,
-            allowDangerouslySkipPermissions: false,
-            allowedTools: ["Read"],
-            maxTurns: 5,
-          },
+          options: { ...claudeIsolationOptions(cwd), allowedTools: ["Read"], maxTurns: 5 },
         },
         systemPrompt: "synthetic",
       },
@@ -1204,110 +1203,125 @@ function setEnvForTest(t: TestContext, values: Record<string, string>): void {
   });
 }
 
-// User settings with the egress hooks among other settings and hooks.
-function userSettingsWithEgress(): Record<string, unknown> {
-  const settings = structuredClone(CLAUDE_SETTINGS_FIXTURE) as { hooks: Record<string, unknown[]> };
-  settings.hooks.PostToolUse.push({
-    matcher: "Bash",
-    hooks: [{ type: "command", command: "/opt/synthetic/other-hook" }],
-  });
-  return { ...settings, permissions: { allow: ["Read"] }, model: "sonnet" };
+function openClaudeSessionIn(
+  fixture: ReturnType<typeof createClientFixture>,
+  method: "create" | "load" | "resume",
+  cwd: string = META_CWD,
+): Promise<unknown> {
+  return fixture.track(
+    method === "create"
+      ? fixture.client.createSession(cwd)
+      : method === "load"
+        ? fixture.client.loadSession("session-meta", cwd)
+        : fixture.client.resumeSession("session-meta", cwd),
+  );
 }
 
-test("AcpClient sends no Claude settings file when user settings carry the egress hooks", async (t) => {
-  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-config-"));
-  setEnvForTest(t, { ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1", CLAUDE_CONFIG_DIR: configDir });
-  const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
-  const saved = await fs.readFile(settingsFile, "utf8");
-  await fs.rm(settingsFile);
-  await fs.writeFile(
-    path.join(configDir, "settings.json"),
-    JSON.stringify(userSettingsWithEgress()),
-  );
-  t.after(async () => {
-    await fs.writeFile(settingsFile, saved);
-    await fs.rm(configDir, { recursive: true, force: true });
-  });
-  const fixture = createClientFixture(t, {
-    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
-  });
-  const cwd = path.resolve("/tmp/acpx-client-meta");
-  const pending = fixture.track(fixture.client.createSession(cwd));
-  const request = await fixture.message(0);
-  assert("method" in request);
-  // The user settings already carry the hooks: no `settings`, so nothing loads twice.
-  assert.deepEqual(request.params, {
-    cwd,
-    mcpServers: [],
-    _meta: {
-      claudeCode: {
-        options: {
-          settingSources: ["user", "project", "local"],
-          managedSettings: CLAUDE_PERMISSION_LOCK,
-          allowDangerouslySkipPermissions: false,
-        },
-      },
-    },
-  });
-  await fixture.reply(request, { sessionId: "session-meta", modes: DEFAULT_MODE_STATE });
-  await pending;
-});
-
 for (const method of ["create", "load", "resume"] as const) {
-  test(`AcpClient ${method} refuses included user settings without the egress hooks`, async (t) => {
-    const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-config-"));
-    setEnvForTest(t, { ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1", CLAUDE_CONFIG_DIR: configDir });
-    t.after(async () => {
-      await fs.rm(configDir, { recursive: true, force: true });
-    });
-    const userFile = path.join(configDir, "settings.json");
-    const good = userSettingsWithEgress() as { hooks: Record<string, any> };
-    const hiddenUnderMatcher = structuredClone(good);
-    hiddenUnderMatcher.hooks.UserPromptSubmit[0].matcher = "Bash";
-    const missingHook = structuredClone(good);
-    delete missingHook.hooks.PreCompact;
-    for (const content of [
-      undefined,
-      "{not json",
-      "{}",
-      JSON.stringify(missingHook),
-      JSON.stringify({ ...good, disableAllHooks: true }),
-      JSON.stringify(hiddenUnderMatcher),
-    ]) {
-      await fs.rm(userFile, { force: true });
-      if (content !== undefined) {
-        await fs.writeFile(userFile, content);
-      }
+  test(`AcpClient ${method} refuses a Claude session asked to include the user settings`, async (t) => {
+    setEnvForTest(t, { ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "0" });
+    for (const value of ["1", "true", "yes"]) {
+      process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = value;
       const fixture = createClientFixture(t, {
         client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
       });
-      const cwd = path.resolve("/tmp/acpx-client-meta");
-      const attempt =
-        method === "create"
-          ? fixture.client.createSession(cwd)
-          : method === "load"
-            ? fixture.client.loadSession("session-meta", cwd)
-            : fixture.client.resumeSession("session-meta", cwd);
-      await assert.rejects(attempt, ClaudeSettingsUnavailableError, String(content));
+      await assert.rejects(openClaudeSessionIn(fixture, method), (error: unknown) => {
+        assert(error instanceof ClaudeSettingsUnavailableError);
+        assert.match(error.message, /ACPX_CLAUDE_INCLUDE_USER_SETTINGS/);
+        return true;
+      });
       assert.equal(fixture.messages.length, 0, "no session request may be sent");
+    }
+  });
+
+  test(`AcpClient ${method} refuses a Claude session whose environment turns settings hooks off`, async (t) => {
+    setEnvForTest(t, { CLAUDE_CODE_SIMPLE: "0", CLAUDE_CODE_SAFE_MODE: "0" });
+    for (const name of ["CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE"]) {
+      process.env[name] = "1";
+      const fixture = createClientFixture(t, {
+        client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+      });
+      await assert.rejects(openClaudeSessionIn(fixture, method), (error: unknown) => {
+        assert(error instanceof ClaudeSettingsUnavailableError);
+        assert.match(error.message, new RegExp(name));
+        return true;
+      });
+      assert.equal(fixture.messages.length, 0, "no session request may be sent");
+      process.env[name] = "0";
     }
   });
 }
 
-test("AcpClient refuses a Claude session whose project settings disable hooks", async (t) => {
+test("AcpClient checks the hook switches in the agent launch environment", async (t) => {
+  const fixture = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  (fixture.client as unknown as { agentLaunchEnv?: NodeJS.ProcessEnv }).agentLaunchEnv = {
+    ...process.env,
+    CLAUDE_CODE_SIMPLE: "1",
+  };
+  await assert.rejects(fixture.client.createSession(META_CWD), /CLAUDE_CODE_SIMPLE/);
+  assert.equal(fixture.messages.length, 0, "no session request may be sent");
+});
+
+test("AcpClient keeps Claude project configuration out of the session directory", async (t) => {
+  // A repository's own settings (hooks, allow rules, disableAllHooks) are not what
+  // Claude Code loads, so they neither refuse nor change the session.
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-claude-project-"));
   t.after(async () => {
     await fs.rm(cwd, { recursive: true, force: true });
   });
   await fs.mkdir(path.join(cwd, ".claude"));
-  for (const name of ["settings.json", "settings.local.json"]) {
-    await fs.writeFile(path.join(cwd, ".claude", name), JSON.stringify({ disableAllHooks: true }));
+  await fs.writeFile(
+    path.join(cwd, ".claude", "settings.json"),
+    JSON.stringify({ disableAllHooks: true, permissions: { allow: ["Write(**)"] } }),
+  );
+  const fixture = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  const pending = fixture.track(fixture.client.createSession(cwd));
+  const request = await fixture.message(0);
+  assert("method" in request);
+  assert.deepEqual(request.params, {
+    cwd,
+    mcpServers: [],
+    _meta: { claudeCode: { options: claudeIsolationOptions(cwd) } },
+  });
+  await fixture.reply(request, { sessionId: "s", modes: DEFAULT_MODE_STATE });
+  await pending;
+  const root = claudeProjectConfigRootPath(scratchHome);
+  assert.deepEqual(await fs.readdir(root), []);
+});
+
+test("AcpClient refuses a Claude session when the project configuration directory is not empty", async (t) => {
+  const root = claudeProjectConfigRootPath(scratchHome);
+  t.after(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  for (const plant of [
+    async () => {
+      await fs.mkdir(path.join(root, ".claude"), { recursive: true });
+    },
+    async () => {
+      await fs.mkdir(root);
+      await fs.writeFile(path.join(root, ".mcp.json"), "{}");
+    },
+    async () => {
+      await fs.symlink(os.tmpdir(), root);
+    },
+  ]) {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(root), { recursive: true });
+    await plant();
     const fixture = createClientFixture(t, {
       client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
     });
-    await assert.rejects(fixture.client.createSession(cwd), /disableAllHooks/, name);
+    await assert.rejects(
+      fixture.client.createSession(META_CWD),
+      ClaudeSettingsUnavailableError,
+      plant.toString(),
+    );
     assert.equal(fixture.messages.length, 0, "no session request may be sent");
-    await fs.rm(path.join(cwd, ".claude", name));
   }
 });
 
@@ -1480,17 +1494,6 @@ test("AcpClient recognises a wrapper the global config declares as Claude family
   }
 });
 
-test("Claude user settings path follows CLAUDE_CONFIG_DIR", () => {
-  assert.equal(
-    claudeUserSettingsFilePath({}, "/home/synthetic"),
-    path.join("/home/synthetic", ".claude", "settings.json"),
-  );
-  assert.equal(
-    claudeUserSettingsFilePath({ CLAUDE_CONFIG_DIR: "/opt/claude" }, "/home/synthetic"),
-    path.join("/opt/claude", "settings.json"),
-  );
-});
-
 // Liaison pins the same digest for liaison/egress/claude-hooks-contract.json.
 test("vendored Claude egress contract matches its pinned digest", () => {
   const canonical = (value: unknown): unknown =>
@@ -1508,7 +1511,6 @@ test("vendored Claude egress contract matches its pinned digest", () => {
     .digest("hex");
   assert.equal(digest, CLAUDE_EGRESS_CONTRACT_DIGEST);
   assert.deepEqual(claudeEgressContractViolations(CLAUDE_SETTINGS_FIXTURE, true), []);
-  assert.deepEqual(claudeEgressContractViolations(userSettingsWithEgress(), false), []);
 });
 
 test("Claude settings file loader reads the fixed acpx path and validates it", async () => {
@@ -1534,6 +1536,14 @@ test("Claude settings file loader reads the fixed acpx path and validates it", a
         "default mode",
         JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, permissions: { defaultMode: "default" } }),
       ],
+      [
+        "simple mode",
+        JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { CLAUDE_CODE_SIMPLE: "1" } }),
+      ],
+      [
+        "safe mode",
+        JSON.stringify({ ...CLAUDE_SETTINGS_FIXTURE, env: { CLAUDE_CODE_SAFE_MODE: "1" } }),
+      ],
     ] as const) {
       const file = path.join(dir, `${name}.json`);
       if (content !== undefined) {
@@ -1558,17 +1568,150 @@ test("Claude settings file loader reads the fixed acpx path and validates it", a
   }
 });
 
-test("resolveClaudeCodeSettingSources includes user settings only when explicitly enabled", () => {
+test("resolveClaudeCodeSettingSources never includes the user settings", () => {
   assert.deepEqual(resolveClaudeCodeSettingSources({}), ["project", "local"]);
-  assert.deepEqual(resolveClaudeCodeSettingSources({ ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1" }), [
-    "user",
+  assert.deepEqual(resolveClaudeCodeSettingSources({ ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "0" }), [
     "project",
     "local",
   ]);
-  assert.deepEqual(resolveClaudeCodeSettingSources({ ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "true" }), [
-    "project",
-    "local",
-  ]);
+  assert.throws(
+    () => resolveClaudeCodeSettingSources({ ACPX_CLAUDE_INCLUDE_USER_SETTINGS: "1" }),
+    ClaudeSettingsUnavailableError,
+  );
+});
+
+async function openedClaudeFixture(
+  t: TestContext,
+  agentCommand: string,
+  client: Partial<ConstructorParameters<typeof AcpClient>[0]> = {},
+) {
+  const fixture = createClientFixture(t, { client: { agentCommand, ...client } });
+  const pending = fixture.track(fixture.client.createSession(META_CWD));
+  await fixture.reply(await fixture.message(0), {
+    sessionId: "session-meta",
+    modes: DEFAULT_MODE_STATE,
+  });
+  await pending;
+  return fixture;
+}
+
+test("AcpClient keeps a Claude-family session in a permitted permission mode", async (t) => {
+  const fixture = await openedClaudeFixture(t, "npx -y @agentclientprotocol/claude-agent-acp");
+  const sent = fixture.messages.length;
+  for (const modeId of ["acceptEdits", "auto", "bypassPermissions", "dontAsk"]) {
+    await assert.rejects(
+      fixture.client.setSessionMode("session-meta", modeId),
+      ClaudePermissionModeLockedError,
+      modeId,
+    );
+    await assert.rejects(
+      fixture.client.setSessionConfigOption("session-meta", "mode", modeId, undefined),
+      ClaudePermissionModeLockedError,
+      modeId,
+    );
+  }
+  assert.equal(fixture.messages.length, sent, "no mode change may be sent");
+
+  for (const modeId of ["default", "plan"]) {
+    const index = fixture.messages.length;
+    const pending = fixture.track(fixture.client.setSessionMode("session-meta", modeId));
+    const request = await fixture.message(index);
+    assert("method" in request);
+    assert.equal(request.method, "session/set_mode");
+    await fixture.reply(request, {});
+    await pending;
+  }
+  const index = fixture.messages.length;
+  const model = fixture.track(
+    fixture.client.setSessionConfigOption("session-meta", "effort", "high", undefined),
+  );
+  const request = await fixture.message(index);
+  assert("method" in request);
+  assert.equal(request.method, "session/set_config_option");
+  await fixture.reply(request, { configOptions: [] });
+  await model;
+});
+
+test("AcpClient leaves mode changes of a non-Claude session alone", async (t) => {
+  const fixture = await openedClaudeFixture(t, "npx -y @agentclientprotocol/codex-acp");
+  const pending = fixture.track(fixture.client.setSessionMode("session-meta", "full-access"));
+  const request = await fixture.message(1);
+  assert("method" in request);
+  assert.equal(request.method, "session/set_mode");
+  await fixture.reply(request, {});
+  await pending;
+});
+
+test("AcpClient cancels a turn in which a Claude session leaves the permitted modes", async (t) => {
+  const fixture = await openedClaudeFixture(t, "npx -y @agentclientprotocol/claude-agent-acp");
+  const start = fixture.messages.length;
+  const prompt = fixture.prompt("session-meta", "hello");
+  const request = await fixture.message(start);
+  // Plan mode is permitted; accept-edits is not.
+  for (const modeId of ["plan", "acceptEdits"]) {
+    await fixture.send({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-meta",
+        update: { sessionUpdate: "current_mode_update", currentModeId: modeId },
+      },
+    });
+  }
+  const cancel = await fixture.message(start + 1);
+  assert("method" in cancel);
+  assert.equal(cancel.method, "session/cancel");
+  await fixture.reply(request, { stopReason: "cancelled" });
+  await assert.rejects(prompt, (error: unknown) => {
+    assert(error instanceof ClaudePermissionModeLockedError);
+    assert.match(error.message, /acceptEdits/);
+    return true;
+  });
+});
+
+test("restrictClaudeFamilyPermissionOptions keeps only one-time approvals when offered", () => {
+  const exitPlan: RequestPermissionRequest = {
+    sessionId: "s",
+    toolCall: { toolCallId: "c", title: "ExitPlanMode", kind: "switch_mode" },
+    options: [
+      { optionId: "exit-plan-auto", name: "Yes, and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-bypass", name: "Yes, and bypass", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+    ],
+  };
+  assert.deepEqual(
+    restrictClaudeFamilyPermissionOptions(exitPlan).options.map((option) => option.optionId),
+    ["exit-plan-default", "reject"],
+  );
+  const onlyAlways: RequestPermissionRequest = {
+    ...exitPlan,
+    options: [{ optionId: "always", name: "Always", kind: "allow_always" }],
+  };
+  assert.equal(restrictClaudeFamilyPermissionOptions(onlyAlways), onlyAlways);
+});
+
+test("AcpClient never answers a Claude-family permission request with an allow-always option", async (t) => {
+  const fixture = await openedClaudeFixture(t, "npx -y @agentclientprotocol/claude-agent-acp", {
+    onPermissionRequest: async () => ({ outcome: "allow_always" }),
+  });
+  const index = fixture.messages.length;
+  const prompt = fixture.prompt("session-meta", "hello");
+  const request = await fixture.message(index);
+  const handler = asInternals(fixture.client).handlePermissionRequest;
+  assert(handler);
+  const response = await handler.call(fixture.client, {
+    sessionId: "session-meta",
+    toolCall: { toolCallId: "c", title: "ExitPlanMode", kind: "switch_mode" },
+    options: [
+      { optionId: "exit-plan-auto", name: "Yes, and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No", kind: "reject_once" },
+    ],
+  });
+  assert.deepEqual(response.outcome, { outcome: "selected", optionId: "exit-plan-default" });
+  await fixture.reply(request, { stopReason: "end_turn" });
+  await prompt;
 });
 
 for (const scenario of [
