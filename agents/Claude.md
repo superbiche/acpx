@@ -125,6 +125,9 @@ The acpx permission policy (`--approve-all`, `--approve-reads`, `--deny-all`,
 Claude Code ignores a parent-supplied managed tier when an administrator's
 managed settings exist on the machine. Tool calls pre-approved by a delivered
 skill's or agent's grant keys (see the user plugin above) do not reach acpx.
+Claude Code's `default` mode runs read-only tools (such as Read, Glob and Grep)
+without asking, so they do not reach acpx either: under `--deny-all` a
+Claude-family session still reads files.
 
 On Windows, native Claude executable discovery resolves relative `PATH` entries
 from the selected session cwd. An explicit `CLAUDE_CODE_EXECUTABLE` still takes

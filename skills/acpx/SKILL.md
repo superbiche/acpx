@@ -361,7 +361,8 @@ calls Claude Code would ask about:
 - the operator's skills and agents arrive as the local plugin
   `~/.acpx/claude-user-plugin`, unfiltered;
 - the session stays in the `default` (or `plan`) permission mode, and allow
-  rules from settings approve nothing.
+  rules from settings approve nothing; read-only tools run without a permission
+  request, even under `--deny-all`.
 
 Grant keys in delivered skill and agent frontmatter can still pre-approve tool
 calls without a permission request. The full contract, including the
