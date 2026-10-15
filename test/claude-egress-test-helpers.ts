@@ -29,8 +29,9 @@ export async function writeClaudeEgressHookStubs(hookDir: string): Promise<void>
   }
 }
 
-// Writes the hook stubs under <home>/egress-hooks and the settings file acpx
-// requires for built-in Claude sessions; returns the settings.
+// Writes the hook stubs under <home>/egress-hooks, the settings file acpx requires
+// for built-in Claude sessions, and an empty user instructions file (a user without a
+// CLAUDE.md: nothing is appended to the system prompt); returns the settings.
 export async function writeClaudeEgressSettings(home: string): Promise<Record<string, unknown>> {
   const hookDir = path.join(home, "egress-hooks");
   await writeClaudeEgressHookStubs(hookDir);
@@ -40,5 +41,6 @@ export async function writeClaudeEgressSettings(home: string): Promise<Record<st
     path.join(home, ".acpx", "claude-settings.json"),
     `${JSON.stringify(settings, null, 2)}\n`,
   );
+  await fs.writeFile(path.join(home, ".acpx", "claude-user-instructions.md"), "");
   return settings;
 }
