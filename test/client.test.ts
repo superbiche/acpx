@@ -70,8 +70,15 @@ const DEFAULT_MODE_STATE = { currentModeId: "default", availableModes: [] };
 const META_CWD = path.resolve("/tmp/acpx-client-meta");
 
 // The Claude Code options acpx sends for every Claude-family session in `cwd`.
-function claudeIsolationOptions(cwd: string = META_CWD): Record<string, unknown> {
+// The SDK system prompt a Claude-family session gets: never recorded (snapshot off).
+const UNRECORDED_DEFAULT_PROMPT = { type: "preset", preset: "claude_code", snapshot: false };
+
+function claudeIsolationOptions(
+  cwd: string = META_CWD,
+  systemPrompt: Record<string, unknown> = UNRECORDED_DEFAULT_PROMPT,
+): Record<string, unknown> {
   return {
+    systemPrompt,
     settingSources: ["project", "local"],
     settings: CLAUDE_SETTINGS_FIXTURE,
     managedSettings: CLAUDE_PERMISSION_LOCK,
@@ -1127,7 +1134,15 @@ for (const method of ["load", "resume"] as const) {
       mcpServers: [],
       _meta: {
         claudeCode: {
-          options: { ...claudeIsolationOptions(cwd), allowedTools: ["Read"], maxTurns: 5 },
+          options: {
+            ...claudeIsolationOptions(cwd, {
+              type: "custom",
+              prompt: "synthetic",
+              snapshot: false,
+            }),
+            allowedTools: ["Read"],
+            maxTurns: 5,
+          },
         },
         systemPrompt: "synthetic",
       },
@@ -1385,12 +1400,26 @@ for (const method of ["create", "load", "resume"] as const) {
     await withUserInstructions(t, "# Fleet rules\n\nAsk before push.\n\n");
     const rules = "# Fleet rules\n\nAsk before push.";
     for (const scenario of [
-      { systemPrompt: undefined, expected: { append: rules } },
+      {
+        systemPrompt: undefined,
+        expected: { append: rules },
+        sdk: { type: "preset", preset: "claude_code", append: rules, snapshot: false },
+      },
       {
         systemPrompt: { append: "  be terse\n" },
         expected: { append: `${rules}\n\n  be terse\n` },
+        sdk: {
+          type: "preset",
+          preset: "claude_code",
+          append: `${rules}\n\n  be terse\n`,
+          snapshot: false,
+        },
       },
-      { systemPrompt: "You review diffs.", expected: `You review diffs.\n\n${rules}` },
+      {
+        systemPrompt: "You review diffs.",
+        expected: `You review diffs.\n\n${rules}`,
+        sdk: { type: "custom", prompt: `You review diffs.\n\n${rules}`, snapshot: false },
+      },
     ]) {
       const sessionOptions =
         scenario.systemPrompt === undefined ? undefined : { systemPrompt: scenario.systemPrompt };
@@ -1401,8 +1430,11 @@ for (const method of ["create", "load", "resume"] as const) {
       const pending = openClaudeSessionIn(fixture, method);
       const request = await fixture.message(0);
       assert("method" in request);
-      const params = request.params as { _meta: Record<string, unknown> };
+      const params = request.params as {
+        _meta: { systemPrompt?: unknown; claudeCode: { options: { systemPrompt: unknown } } };
+      };
       assert.deepEqual(params._meta.systemPrompt, scenario.expected);
+      assert.deepEqual(params._meta.claudeCode.options.systemPrompt, scenario.sdk);
       assert.deepEqual(sessionOptions, given, "the caller's options are not rewritten");
       await fixture.reply(request, { sessionId: "session-meta", modes: DEFAULT_MODE_STATE });
       await pending;

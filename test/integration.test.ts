@@ -1488,6 +1488,7 @@ test("integration: exec forwards model, allowed-tools, and max-turns in session/
             model: "sonnet",
             allowedTools: ["Read", "Grep"],
             maxTurns: 7,
+            systemPrompt: { type: "preset", preset: "claude_code", snapshot: false },
             settingSources: ["project", "local"],
             settings: claudeSettings,
             managedSettings: { allowManagedPermissionRulesOnly: true, permissions: {} },

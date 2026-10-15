@@ -349,21 +349,20 @@ export function buildClaudeCodeOptionsMeta(
   context: ClaudeSettingsContext = {},
 ): Record<string, unknown> | undefined {
   const claudeCodeOptions: Record<string, unknown> = {};
-  let userInstructions: string | undefined;
-  if (isolateUserSettings) {
-    assignClaudeCodeSettingIsolation(claudeCodeOptions, context);
-    userInstructions = loadClaudeUserInstructions(context.home);
-  }
+  const meta: Record<string, unknown> = {};
   if (options) {
     assignClaudeCodeOptions(claudeCodeOptions, options);
   }
+  if (isolateUserSettings) {
+    assignClaudeCodeSettingIsolation(claudeCodeOptions, context);
+    assignClaudeFamilySystemPrompt(meta, claudeCodeOptions, options, context.home);
+  } else {
+    assignClaudeCodeSystemPrompt(meta, options?.systemPrompt);
+  }
 
-  const meta: Record<string, unknown> = {};
   if (Object.keys(claudeCodeOptions).length > 0) {
     meta.claudeCode = { options: claudeCodeOptions };
   }
-
-  assignClaudeCodeSystemPrompt(meta, options?.systemPrompt, userInstructions);
 
   if (Object.keys(meta).length === 0) {
     return undefined;
@@ -617,6 +616,38 @@ function assignClaudeCodeSystemPrompt(
   if (userInstructions !== undefined) {
     target.systemPrompt = { append: userInstructions };
   }
+}
+
+// The composed prompt (user instructions included) goes both in _meta.systemPrompt
+// and, unrecorded, as the SDK systemPrompt option.
+function assignClaudeFamilySystemPrompt(
+  meta: Record<string, unknown>,
+  claudeCodeOptions: Record<string, unknown>,
+  options: AcpClientOptions["sessionOptions"],
+  home: string | undefined,
+): void {
+  assignClaudeCodeSystemPrompt(meta, options?.systemPrompt, loadClaudeUserInstructions(home));
+  claudeCodeOptions.systemPrompt = unrecordedClaudeSystemPrompt(meta.systemPrompt);
+}
+
+// Claude Code records a conversation's system prompt on its first request and, by
+// default, sends that record on every later request, load and resume, ignoring the
+// prompt given at load or resume until compaction. A Claude-family session must get
+// the current user instructions, so acpx passes the composed prompt as the SDK
+// systemPrompt option (which the adapter applies over _meta.systemPrompt) with
+// snapshot: false: rendered fresh on every request, never recorded, and a record an
+// earlier session left is not used.
+function unrecordedClaudeSystemPrompt(composed: unknown): Record<string, unknown> {
+  if (typeof composed === "string") {
+    return { type: "custom", prompt: composed, snapshot: false };
+  }
+  const append = (composed as { append?: string } | undefined)?.append;
+  return {
+    type: "preset",
+    preset: "claude_code",
+    ...(append === undefined ? {} : { append }),
+    snapshot: false,
+  };
 }
 
 function joinPromptParts(first: string | undefined, second: string | undefined): string {

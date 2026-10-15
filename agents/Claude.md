@@ -88,7 +88,16 @@ file it imports, one level deep. Like the settings file, it is required, since
 it carries the operator's safety and approval rules: when it is missing or
 unreadable acpx refuses the session and sends no session request. An empty file
 (no user `CLAUDE.md`) appends nothing. acpx re-reads it at every session start;
-saved session options keep only the caller's own text.
+saved session options keep only the caller's own text. Claude Code normally
+records a conversation's system prompt on its first request and reuses that
+record on every later request, load and resume; acpx turns that recording off
+for Claude-family sessions (the SDK `systemPrompt` option with
+`snapshot: false`, which carries the composed prompt), so a loaded or resumed
+conversation, including one created before these instructions existed, gets
+the current file. The prompt is rendered on every request: it stays
+byte-identical, and so prompt-cacheable, until the instructions file, the
+caller's prompt or Claude Code's own prompt changes; such a change costs one
+uncached prompt and, with extended thinking, drops the earlier reasoning.
 
 What a Claude-family session loads, and what it does not:
 
