@@ -365,7 +365,7 @@ calls Claude Code would ask about:
 Grant keys in delivered skill and agent frontmatter can still pre-approve tool
 calls without a permission request. The full contract, including the
 load/lose table, the refusal conditions and that caveat, is in
-[agents/Claude.md](https://github.com/openclaw/acpx/blob/main/agents/Claude.md#settings-isolation).
+[agents/Claude.md](../../agents/Claude.md#settings-isolation).
 
 On Windows, native Claude executable discovery resolves relative `PATH` entries
 from the selected session cwd. An explicit `CLAUDE_CODE_EXECUTABLE` still takes
