@@ -28,6 +28,10 @@ import {
   CLAUDE_EGRESS_CONTRACT_DIGEST,
   claudeEgressContractViolations,
 } from "../src/acp/claude-egress-contract.js";
+import {
+  claudeUserInstructionsPath,
+  loadClaudeUserInstructions,
+} from "../src/acp/claude-user-instructions.js";
 import { claudeUserPluginPath, loadClaudeUserPlugin } from "../src/acp/claude-user-plugin.js";
 import {
   AcpClient,
@@ -1358,6 +1362,120 @@ test("AcpClient delivers the user plugin to Claude-family sessions", async (t) =
   });
   await assert.rejects(refused.client.createSession(META_CWD), /found hooks/);
   assert.equal(refused.messages.length, 0, "no session request may be sent");
+});
+
+// The user CLAUDE.md, flattened by the operator's tooling, follows the base prompt
+// and precedes the caller's append, on creation, load and resume.
+const USER_INSTRUCTIONS_FILE = path.join(scratchHome, ".acpx", "claude-user-instructions.md");
+
+async function withUserInstructions(t: TestContext, content: string | undefined): Promise<void> {
+  const saved = await fs.readFile(USER_INSTRUCTIONS_FILE, "utf8");
+  t.after(async () => {
+    await fs.rm(USER_INSTRUCTIONS_FILE, { recursive: true, force: true });
+    await fs.writeFile(USER_INSTRUCTIONS_FILE, saved);
+  });
+  await fs.rm(USER_INSTRUCTIONS_FILE, { recursive: true, force: true });
+  if (content !== undefined) {
+    await fs.writeFile(USER_INSTRUCTIONS_FILE, content);
+  }
+}
+
+for (const method of ["create", "load", "resume"] as const) {
+  test(`AcpClient ${method} appends the user instructions to Claude-family system prompts`, async (t) => {
+    await withUserInstructions(t, "# Fleet rules\n\nAsk before push.\n\n");
+    const rules = "# Fleet rules\n\nAsk before push.";
+    for (const scenario of [
+      { systemPrompt: undefined, expected: { append: rules } },
+      {
+        systemPrompt: { append: "  be terse\n" },
+        expected: { append: `${rules}\n\n  be terse\n` },
+      },
+      { systemPrompt: "You review diffs.", expected: `You review diffs.\n\n${rules}` },
+    ]) {
+      const sessionOptions =
+        scenario.systemPrompt === undefined ? undefined : { systemPrompt: scenario.systemPrompt };
+      const given = structuredClone(sessionOptions);
+      const fixture = createClientFixture(t, {
+        client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp", sessionOptions },
+      });
+      const pending = openClaudeSessionIn(fixture, method);
+      const request = await fixture.message(0);
+      assert("method" in request);
+      const params = request.params as { _meta: Record<string, unknown> };
+      assert.deepEqual(params._meta.systemPrompt, scenario.expected);
+      assert.deepEqual(sessionOptions, given, "the caller's options are not rewritten");
+      await fixture.reply(request, { sessionId: "session-meta", modes: DEFAULT_MODE_STATE });
+      await pending;
+    }
+  });
+
+  test(`AcpClient ${method} refuses a Claude session without a readable user instructions file`, async (t) => {
+    await withUserInstructions(t, undefined);
+    for (const make of [
+      async () => {},
+      async () => {
+        await fs.mkdir(USER_INSTRUCTIONS_FILE);
+      },
+    ]) {
+      await make();
+      const fixture = createClientFixture(t, {
+        client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+      });
+      await assert.rejects(openClaudeSessionIn(fixture, method), (error: unknown) => {
+        assert(error instanceof ClaudeSettingsUnavailableError);
+        assert.match(error.message, /claude-user-instructions\.md/);
+        return true;
+      });
+      assert.equal(fixture.messages.length, 0, "no session request may be sent");
+    }
+  });
+}
+
+test("AcpClient appends nothing for empty user instructions, and only to Claude-family sessions", async (t) => {
+  await withUserInstructions(t, " \n\n");
+  for (const scenario of [
+    {
+      agentCommand: "npx -y @agentclientprotocol/claude-agent-acp",
+      sessionOptions: { systemPrompt: { append: "be terse" } },
+      expected: { append: "be terse" },
+    },
+    { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp", expected: undefined },
+  ]) {
+    const fixture = createClientFixture(t, { client: scenario });
+    const pending = openClaudeSessionIn(fixture, "create");
+    const request = await fixture.message(0);
+    assert("method" in request);
+    assert.deepEqual(
+      (request.params as { _meta: Record<string, unknown> })._meta.systemPrompt,
+      scenario.expected,
+    );
+    await fixture.reply(request, { sessionId: "s", modes: DEFAULT_MODE_STATE });
+    await pending;
+  }
+  await fs.writeFile(USER_INSTRUCTIONS_FILE, "Ask before push.\n");
+  const codex = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/codex-acp" },
+  });
+  const pending = openClaudeSessionIn(codex, "create");
+  const request = await codex.message(0);
+  assert("method" in request);
+  assert.equal((request.params as { _meta?: unknown })._meta, undefined);
+  await codex.reply(request, { sessionId: "s", modes: DEFAULT_MODE_STATE });
+  await pending;
+});
+
+test("loadClaudeUserInstructions trims trailing whitespace and refuses a missing file", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-instructions-"));
+  try {
+    assert.throws(() => loadClaudeUserInstructions(home), ClaudeSettingsUnavailableError);
+    await fs.mkdir(path.join(home, ".acpx"));
+    await fs.writeFile(claudeUserInstructionsPath(home), "\n  Rules.\n\n");
+    assert.equal(loadClaudeUserInstructions(home), "\n  Rules.");
+    await fs.writeFile(claudeUserInstructionsPath(home), "");
+    assert.equal(loadClaudeUserInstructions(home), undefined);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
 
 async function writeUserPlugin(

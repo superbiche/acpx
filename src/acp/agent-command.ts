@@ -9,6 +9,7 @@ import {
   type CommandCheck,
   isExecutableFile,
 } from "./claude-egress-contract.js";
+import { loadClaudeUserInstructions } from "./claude-user-instructions.js";
 import { loadClaudeUserPlugin } from "./claude-user-plugin.js";
 import { basenameToken, splitCommandLine } from "./client-process.js";
 
@@ -348,8 +349,10 @@ export function buildClaudeCodeOptionsMeta(
   context: ClaudeSettingsContext = {},
 ): Record<string, unknown> | undefined {
   const claudeCodeOptions: Record<string, unknown> = {};
+  let userInstructions: string | undefined;
   if (isolateUserSettings) {
     assignClaudeCodeSettingIsolation(claudeCodeOptions, context);
+    userInstructions = loadClaudeUserInstructions(context.home);
   }
   if (options) {
     assignClaudeCodeOptions(claudeCodeOptions, options);
@@ -360,7 +363,7 @@ export function buildClaudeCodeOptionsMeta(
     meta.claudeCode = { options: claudeCodeOptions };
   }
 
-  assignClaudeCodeSystemPrompt(meta, options?.systemPrompt);
+  assignClaudeCodeSystemPrompt(meta, options?.systemPrompt, userInstructions);
 
   if (Object.keys(meta).length === 0) {
     return undefined;
@@ -386,7 +389,9 @@ export function buildClaudeCodeOptionsMeta(
 //   session directory is passed as ACPX_CLAUDE_PROJECT_DIR for the hook commands to
 //   return to.
 // - the operator's own skills and agents come from ~/.acpx/claude-user-plugin when
-//   it exists (see claude-user-plugin.ts).
+//   it exists (see claude-user-plugin.ts), and the user CLAUDE.md, flattened, from
+//   ~/.acpx/claude-user-instructions.md, appended to the system prompt (see
+//   claude-user-instructions.ts and assignClaudeCodeSystemPrompt).
 // - the environment of the Claude Code process itself (whatever a launcher exported
 //   before starting the adapter) is overridden for the switches that turn settings
 //   hooks off, wrap them, add plugins or drop CLAUDE.md.
@@ -592,17 +597,30 @@ function assignClaudeCodeOptions(
   }
 }
 
+// The user instructions of a Claude-family session follow the base prompt (Claude
+// Code's default, or the caller's replacement) and precede a caller-supplied append,
+// the session-specific text, which stays last. The caller's own text is sent as given;
+// saved session options keep it without the instructions.
 function assignClaudeCodeSystemPrompt(
   target: Record<string, unknown>,
   systemPrompt: NonNullable<AcpClientOptions["sessionOptions"]>["systemPrompt"] | undefined,
+  userInstructions?: string,
 ): void {
   if (typeof systemPrompt === "string" && systemPrompt.length > 0) {
-    target.systemPrompt = systemPrompt;
+    target.systemPrompt = joinPromptParts(systemPrompt, userInstructions);
     return;
   }
   if (isAppendSystemPrompt(systemPrompt)) {
-    target.systemPrompt = { append: systemPrompt.append };
+    target.systemPrompt = { append: joinPromptParts(userInstructions, systemPrompt.append) };
+    return;
   }
+  if (userInstructions !== undefined) {
+    target.systemPrompt = { append: userInstructions };
+  }
+}
+
+function joinPromptParts(first: string | undefined, second: string | undefined): string {
+  return [first, second].filter((part): part is string => part !== undefined).join("\n\n");
 }
 
 function isAppendSystemPrompt(

@@ -356,7 +356,8 @@ calls Claude Code would ask about:
   missing file, a missing egress hook, or `permissions.allow` set);
 - repository `.claude` configuration and `.mcp.json` are not read; the
   session directory's `CLAUDE.md` and its imports still load; the user
-  `CLAUDE.md` does not;
+  `CLAUDE.md`, flattened into `~/.acpx/claude-user-instructions.md`, is
+  appended to the system prompt, and a missing file refuses the session;
 - the operator's skills and agents arrive as the local plugin
   `~/.acpx/claude-user-plugin`, unfiltered;
 - the session stays in the `default` (or `plan`) permission mode, and allow

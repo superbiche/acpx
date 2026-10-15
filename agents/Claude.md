@@ -77,19 +77,32 @@ unusual YAML forms (escaped, flow-style or explicit keys) and flag text that is
 not a grant, so zero findings is not proof that no delivered skill or agent
 declares one.
 
+Because the user setting source stays off, Claude Code does not load the user
+`CLAUDE.md` or its imports itself. acpx appends
+`~/.acpx/claude-user-instructions.md` to the system prompt of every
+Claude-family session on creation, load and resume: after Claude Code's default
+prompt (or a `--system-prompt` replacement) and before any
+`--append-system-prompt` text, each joined by a blank line. Liaison renders it
+with `liaison acpx link --install`: the user `CLAUDE.md` as written, then each
+file it imports, one level deep. Like the settings file, it is required, since
+it carries the operator's safety and approval rules: when it is missing or
+unreadable acpx refuses the session and sends no session request. An empty file
+(no user `CLAUDE.md`) appends nothing. acpx re-reads it at every session start;
+saved session options keep only the caller's own text.
+
 What a Claude-family session loads, and what it does not:
 
-| Surface                                                                                                                                                                 | Loaded                                                                                 |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Session directory `CLAUDE.md`, its imports, `.claude/rules`                                                                                                             | yes                                                                                    |
-| `~/.acpx/claude-settings.json` (derived settings: egress, guard and memory hooks, deny and ask rules)                                                                   | yes                                                                                    |
-| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, unfiltered (grant keys included)       |
-| Built-in skills and agents of Claude Code                                                                                                                               | yes                                                                                    |
-| User `CLAUDE.md` (`~/.claude/CLAUDE.md`) and its imports                                                                                                                | no                                                                                     |
-| User settings and everything else Claude Code reads from `~/.claude` through the user setting source (commands, output styles, rules), user-enabled marketplace plugins | no                                                                                     |
-| `skillOverrides` and other skill-listing settings                                                                                                                       | no effect: Claude Code reads them only from the user, project and local settings files |
-| Repository `.claude` settings, hooks, permission rules, skills, agents, commands, `.mcp.json`                                                                           | no                                                                                     |
-| Plugins named by `CLAUDE_CODE_PLUGIN_DIRS`                                                                                                                              | no                                                                                     |
+| Surface                                                                                                                                                                 | Loaded                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Session directory `CLAUDE.md`, its imports, `.claude/rules`                                                                                                             | yes                                                                                                                  |
+| `~/.acpx/claude-settings.json` (derived settings: egress, guard and memory hooks, deny and ask rules)                                                                   | yes                                                                                                                  |
+| User skills and agents (`~/.claude/skills`, `~/.claude/agents`)                                                                                                         | yes, through the user plugin, as `user:<name>`, unfiltered (grant keys included)                                     |
+| Built-in skills and agents of Claude Code                                                                                                                               | yes                                                                                                                  |
+| User `CLAUDE.md` (`~/.claude/CLAUDE.md`) and its imports                                                                                                                | yes, flattened into `~/.acpx/claude-user-instructions.md` and appended to the system prompt (imports one level deep) |
+| User settings and everything else Claude Code reads from `~/.claude` through the user setting source (commands, output styles, rules), user-enabled marketplace plugins | no                                                                                                                   |
+| `skillOverrides` and other skill-listing settings                                                                                                                       | no effect: Claude Code reads them only from the user, project and local settings files                               |
+| Repository `.claude` settings, hooks, permission rules, skills, agents, commands, `.mcp.json`                                                                           | no                                                                                                                   |
+| Plugins named by `CLAUDE_CODE_PLUGIN_DIRS`                                                                                                                              | no                                                                                                                   |
 
 The acpx permission policy (`--approve-all`, `--approve-reads`, `--deny-all`,
 `--permission-policy`) decides every tool call Claude Code would ask about:
@@ -131,7 +144,7 @@ Use `--append-system-prompt` instead to append instructions to Claude's default 
 
 Both system-prompt flags also apply to `flow run`, including persistent and isolated ACP nodes using Claude.
 
-Embedded callers can supply raw nonempty replacement or append text through `SessionAgentOptions.systemPrompt`. ACPX preserves that text exactly in saved options and `session/new`, `session/load`, and `session/resume` metadata, including whitespace-only text. CLI prompt flags trim surrounding whitespace and reject whitespace-only values.
+Embedded callers can supply raw nonempty replacement or append text through `SessionAgentOptions.systemPrompt`. ACPX preserves that text exactly in saved options and `session/new`, `session/load`, and `session/resume` metadata, including whitespace-only text; for Claude-family sessions the metadata also carries the user instructions around it (see [Settings isolation](#settings-isolation)). CLI prompt flags trim surrounding whitespace and reject whitespace-only values.
 
 ## Embedded inspection
 
