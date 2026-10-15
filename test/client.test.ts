@@ -1196,13 +1196,20 @@ function contractViolatingFiles(): string[] {
   return [
     "{}",
     variant((settings) => {
-      delete settings.hooks.PreCompact;
+      delete settings.hooks.PostToolBatch;
     }),
     variant((settings) => {
       Object.assign(settings, { disableAllHooks: true });
     }),
     variant((settings) => {
-      delete settings.hooks.UserPromptSubmit[0].hooks[0].type;
+      delete settings.hooks.SessionStart[0].hooks[0].type;
+    }),
+    // A file rendered for the earlier fail-closed contract: a hook that blocks on failure.
+    variant((settings) => {
+      settings.hooks.PostToolBatch[0].hooks[0].onFailure = "block";
+    }),
+    variant((settings) => {
+      delete settings.hooks.PostToolUse[0].hooks[0].onFailure;
     }),
     variant((settings) => {
       settings.hooks.PostToolUse[0].hooks[0].command = "/nonexistent/egress-cc-post-tool-use";

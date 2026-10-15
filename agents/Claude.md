@@ -23,9 +23,10 @@ Claude-family sessions never load the user settings. They pass
 `~/.acpx/claude-settings.json` to Claude Code as flag settings;
 `liaison acpx link --install` renders it from the user settings. The file must
 carry the egress hooks of Liaison's declared hook contract (vendored in
-`src/acp/claude-egress-contract.ts`: five events, each with its script, timeout
-and failure policy, every command an absolute path to an executable file) among
-its other settings, and must not set `permissions.allow`,
+`src/acp/claude-egress-contract.ts`: PostToolUse, PostToolBatch and
+SessionStart, each with its script, timeout and failure policy `continue`,
+every command an absolute path to an executable file) among its other
+settings, and must not set `permissions.allow`,
 `permissions.defaultMode`, or in `env` any of the switches below or
 `ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable, not valid JSON, lacks
 a contract hook, or sets one of those keys, acpx refuses to create, load, or
@@ -33,6 +34,15 @@ resume the session and sends no session request. acpx also refuses when the
 agent's environment sets `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`, or
 `CLAUDE_CODE_SIMPLE` or `CLAUDE_CODE_SAFE_MODE` (both stop Claude Code from
 running settings hooks).
+
+The egress hooks redact and never prevent: they rewrite or report secret values
+in tool output, never block a prompt, a turn or a compaction, and let content
+through unredacted when Liaison's redactor is absent (Claude Code's
+session-start notice about it does not reach ACP clients). The refusal above
+guards only their presence in the settings file. A
+file rendered for the earlier five-event contract (`UserPromptSubmit`,
+`PreCompact`, `onFailure: block`) is refused; re-render it with
+`liaison acpx link --install`.
 
 A launcher (a wrapper script, or `CLAUDE_CODE_*` variables inherited by the
 adapter) can set variables acpx never sees. acpx therefore sets them in the

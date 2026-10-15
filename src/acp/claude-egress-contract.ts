@@ -3,26 +3,26 @@ import path from "node:path";
 
 // Vendored copy of Liaison's declared Claude Code egress hook contract
 // (liaison/egress/claude-hooks-contract.json, schema liaison-egress-claude-hooks/1),
-// without its prose. Liaison renders ~/.acpx/claude-settings.json from the same
-// contract and checks it with `liaison egress link --check`; acpx validates the
-// settings a Claude session loads against this copy before creating, loading or
-// resuming it. Both sides pin CLAUDE_EGRESS_CONTRACT_DIGEST: change them together.
+// without its prose. Redact, never prevent: the hooks rewrite or report secret values
+// and never block (`onFailure: continue`); no prompt or compaction hook. Liaison derives
+// ~/.acpx/claude-settings.json with these hooks and checks it with
+// `liaison acpx link --check`; acpx validates the settings a Claude session loads
+// against this copy before creating, loading or resuming it. Both sides pin
+// CLAUDE_EGRESS_CONTRACT_DIGEST: change them together.
 export const CLAUDE_EGRESS_CONTRACT = {
   schema: "liaison-egress-claude-hooks/1",
   topLevelKeys: ["hooks"],
   disablingKeys: ["disableAllHooks"],
   events: {
-    PostToolBatch: { script: "egress-cc-post-tool-batch", timeout: 30, onFailure: "block" },
-    PostToolUse: { script: "egress-cc-post-tool-use", timeout: 20 },
-    PreCompact: { script: "egress-cc-pre-compact", timeout: 60, onFailure: "block" },
-    SessionStart: { script: "egress-cc-session-start", timeout: 10 },
-    UserPromptSubmit: { script: "egress-cc-user-prompt-submit", timeout: 60, onFailure: "block" },
+    PostToolBatch: { script: "egress-cc-post-tool-batch", timeout: 30, onFailure: "continue" },
+    PostToolUse: { script: "egress-cc-post-tool-use", timeout: 20, onFailure: "continue" },
+    SessionStart: { script: "egress-cc-session-start", timeout: 10, onFailure: "continue" },
   },
 } as const;
 
 // SHA-256 of the canonical contract (sorted keys, compact separators, no "doc").
 export const CLAUDE_EGRESS_CONTRACT_DIGEST =
-  "a75eac169a79c173ca35e7596916f2cacb03d67e1b1ec7986ba9f3de13eedddf";
+  "a9f1cb7e4befe2118b4b48b54d6f9af52e5badf7dbc6bfaedfbf898024e0a8da";
 
 type HookRule = { script: string; timeout: number; onFailure?: string };
 export type CommandCheck = (command: string) => boolean;
