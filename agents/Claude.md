@@ -26,12 +26,14 @@ Claude-family sessions never load the user settings. They pass
 egress cutover is on, the file must carry the egress hooks of Liaison's
 declared hook contract (vendored in `src/acp/claude-egress-contract.ts`:
 PostToolUse, PostToolBatch and SessionStart, each with its script, timeout and
-failure policy `continue`, every command an absolute path to an executable
-file) among its other settings. Before the cutover it may omit them, and
+failure policy `continue`, every command exactly the absolute path of an
+executable file, with no arguments, shell quoting, interpreter or environment
+prefix) among its other settings. Before the cutover it may omit them, and
 Liaison renders none; a file that carries any of them must still carry the
-whole contract. In both states the file must not set `disableAllHooks`,
-`permissions.allow`, `permissions.defaultMode`, or in `env` any of the
-switches below or `ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable,
+whole contract. In both states a hook command that names a contract script in
+any other form than its bare absolute path is refused, and the file must not
+set `disableAllHooks`, `permissions.allow`, `permissions.defaultMode`, or in
+`env` any of the switches below or `ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable,
 not valid JSON, lacks a contract hook it requires, or sets one of those keys,
 acpx refuses to create, load, or resume the session and sends no session
 request.

@@ -26,6 +26,64 @@ export const CLAUDE_EGRESS_CONTRACT_DIGEST =
   "a9f1cb7e4befe2118b4b48b54d6f9af52e5badf7dbc6bfaedfbf898024e0a8da";
 
 type HookRule = { script: string; timeout: number; onFailure?: string };
+
+// Supported command grammar for an egress hook: the command is exactly the absolute
+// path of its script, with no argument, no shell quoting or escaping, and no
+// interpreter or environment prefix. A command that names a contract script (the name
+// bounded by characters that cannot belong to a file name) in any other form is a
+// contract violation, whatever the cutover state.
+const NAME_CHAR = /[A-Za-z0-9_.-]/;
+const SHELL_SPECIAL = /[\s"'`\\$;&|<>()*?[\]{}]/;
+
+function namesScript(command: string, script: string): boolean {
+  for (let at = command.indexOf(script); at >= 0; at = command.indexOf(script, at + 1)) {
+    const before = command[at - 1] ?? "";
+    const after = command[at + script.length] ?? "";
+    if (!NAME_CHAR.test(before) && !NAME_CHAR.test(after)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isBareScriptCommand(command: string, script: string): boolean {
+  return (
+    path.isAbsolute(command) && !SHELL_SPECIAL.test(command) && path.basename(command) === script
+  );
+}
+
+function groupCommands(group: unknown): string[] {
+  if (!isRecord(group) || !Array.isArray(group.hooks)) {
+    return [];
+  }
+  return group.hooks.flatMap((hook) =>
+    isRecord(hook) && typeof hook.command === "string" ? [hook.command] : [],
+  );
+}
+
+// Every command hook as [event, command], in any event or group.
+function hookCommands(hooks: Record<string, unknown>): Array<[string, string]> {
+  return Object.entries(hooks).flatMap(([event, groups]) =>
+    Array.isArray(groups)
+      ? groups.flatMap(groupCommands).map((command): [string, string] => [event, command])
+      : [],
+  );
+}
+
+// Commands that name a contract script without being its bare absolute path.
+function commandGrammarViolations(hooks: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  for (const [event, command] of hookCommands(hooks)) {
+    for (const rule of Object.values(CLAUDE_EGRESS_CONTRACT.events)) {
+      if (namesScript(command, rule.script) && !isBareScriptCommand(command, rule.script)) {
+        found.add(
+          `${event}: a hook command naming ${rule.script} is not its bare absolute path (no arguments, no shell quoting)`,
+        );
+      }
+    }
+  }
+  return [...found];
+}
 export type CommandCheck = (command: string) => boolean;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,22 +233,11 @@ const CONTRACT_SCRIPTS: ReadonlySet<string> = new Set(
   Object.values(CLAUDE_EGRESS_CONTRACT.events).map((rule) => rule.script),
 );
 
-// Whether any command hook, in any event or group, runs a contract script.
+// Whether any command hook, in any event or group, names a contract script, in any
+// form (see the command grammar above).
 function carriesEgressHook(hooks: Record<string, unknown>): boolean {
-  return Object.values(hooks).some(
-    (groups) =>
-      Array.isArray(groups) &&
-      groups.some(
-        (group) =>
-          isRecord(group) &&
-          Array.isArray(group.hooks) &&
-          group.hooks.some(
-            (hook) =>
-              isRecord(hook) &&
-              typeof hook.command === "string" &&
-              CONTRACT_SCRIPTS.has(path.basename(hook.command)),
-          ),
-      ),
+  return hookCommands(hooks).some(([, command]) =>
+    [...CONTRACT_SCRIPTS].some((script) => namesScript(command, script)),
   );
 }
 
@@ -230,5 +277,9 @@ export function claudeEgressContractViolations(
   if (!isRecord(settings.hooks)) {
     return [...found, "hooks is not an object"];
   }
-  return [...found, ...eventViolations(settings.hooks, exact, isUsable)];
+  return [
+    ...found,
+    ...eventViolations(settings.hooks, exact, isUsable),
+    ...commandGrammarViolations(settings.hooks),
+  ];
 }

@@ -1372,6 +1372,57 @@ test("before the egress cutover the settings may omit the egress hooks, never ca
   assert.notDeepEqual(claudeEgressAdmissionViolations({}, true, isUsable), []);
 });
 
+test("an egress hook command is its bare absolute path, in both cutover states", () => {
+  const isUsable = () => true;
+  const script = path.join(scratchHome, "egress-hooks", "egress-cc-post-tool-use");
+  const withCommand = (base: Record<string, unknown>, command: string) => {
+    const settings = structuredClone(base) as { hooks?: Record<string, unknown[]> };
+    settings.hooks ??= {};
+    settings.hooks.PreToolUse = [
+      ...(settings.hooks.PreToolUse ?? []),
+      { hooks: [{ type: "command", command }] },
+    ];
+    return settings;
+  };
+  const decorated = [
+    `${script} --flag`,
+    `"${script}"`,
+    `'${script}'`,
+    `sh -c ${script}`,
+    `${script};true`,
+    `FOO=1 ${script}`,
+    "egress-cc-post-tool-use",
+  ];
+  for (const command of decorated) {
+    for (const cutover of [false, true]) {
+      for (const base of [{}, CLAUDE_SETTINGS_FIXTURE]) {
+        const problems = claudeEgressAdmissionViolations(
+          withCommand(base, command),
+          cutover,
+          isUsable,
+        );
+        assert(
+          problems.some((problem) => problem.includes("bare absolute path")),
+          `${command} ${cutover}: ${problems.join("; ")}`,
+        );
+      }
+    }
+  }
+  for (const command of [
+    `${script}.bak`,
+    `${path.dirname(script)}/myegress-cc-post-tool-use`,
+    "/opt/guard.sh",
+  ]) {
+    assert.deepEqual(
+      claudeEgressAdmissionViolations(withCommand({}, command), false, isUsable),
+      [],
+      command,
+    );
+  }
+  assert.deepEqual(claudeEgressAdmissionViolations(CLAUDE_SETTINGS_FIXTURE, true, isUsable), []);
+  assert.deepEqual(claudeEgressContractViolations(CLAUDE_SETTINGS_FIXTURE, true, isUsable), []);
+});
+
 // Cutover states as the agent environment and the marker express them.
 const CUTOVER_STATES = [
   { name: "no marker", cutover: false, env: { LIAISON_EGRESS_CUTOVER: "" }, marker: false },
