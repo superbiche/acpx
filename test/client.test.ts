@@ -26,7 +26,10 @@ import {
 import {
   CLAUDE_EGRESS_CONTRACT,
   CLAUDE_EGRESS_CONTRACT_DIGEST,
+  claudeEgressAdmissionViolations,
   claudeEgressContractViolations,
+  isLiaisonEgressCutoverOn,
+  liaisonEgressCutoverFile,
 } from "../src/acp/claude-egress-contract.js";
 import {
   claudeUserInstructionsPath,
@@ -61,8 +64,9 @@ import { claudeEgressSettings, writeClaudeEgressSettings } from "./claude-egress
 import { withMockedReadline, withTtyState } from "./tty-test-helpers.js";
 
 // Built-in Claude sessions without user settings read ~/.acpx/claude-settings.json
-// and require the egress hook contract in it; every test in this file runs against
-// a scratch HOME holding one with executable hook stubs.
+// and require the egress hook contract in it once the egress cutover is on; every test
+// in this file runs against a scratch HOME holding one with executable hook stubs, with
+// the cutover forced on unless a test says otherwise.
 const scratchHome = mkdtempSync(path.join(os.tmpdir(), "acpx-client-home-"));
 const CLAUDE_SETTINGS_FIXTURE = claudeEgressSettings(path.join(scratchHome, "egress-hooks"));
 const CLAUDE_PERMISSION_LOCK = { allowManagedPermissionRulesOnly: true, permissions: {} };
@@ -88,10 +92,12 @@ function claudeIsolationOptions(
   };
 }
 const originalHome = process.env.HOME;
+const originalCutover = process.env.LIAISON_EGRESS_CUTOVER;
 
 before(async () => {
   assert.deepEqual(await writeClaudeEgressSettings(scratchHome), CLAUDE_SETTINGS_FIXTURE);
   process.env.HOME = scratchHome;
+  process.env.LIAISON_EGRESS_CUTOVER = "1";
 });
 
 after(async () => {
@@ -99,6 +105,11 @@ after(async () => {
     delete process.env.HOME;
   } else {
     process.env.HOME = originalHome;
+  }
+  if (originalCutover === undefined) {
+    delete process.env.LIAISON_EGRESS_CUTOVER;
+  } else {
+    process.env.LIAISON_EGRESS_CUTOVER = originalCutover;
   }
   await fs.rm(scratchHome, { recursive: true, force: true });
 });
@@ -1261,6 +1272,213 @@ function contractViolatingFiles(): string[] {
     }),
   ];
 }
+
+test("egress cutover resolution follows Liaison's hook wrapper", async (t) => {
+  // ${LIAISON_EGRESS_CUTOVER_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/liaison/egress-cutover}
+  for (const [env, file] of [
+    [{ HOME: "/h" }, "/h/.local/state/liaison/egress-cutover"],
+    [{ HOME: "/h", XDG_STATE_HOME: "" }, "/h/.local/state/liaison/egress-cutover"],
+    [{ HOME: "/h", XDG_STATE_HOME: "/s" }, "/s/liaison/egress-cutover"],
+    [
+      { HOME: "/h", XDG_STATE_HOME: "/s", LIAISON_EGRESS_CUTOVER_FILE: "" },
+      "/s/liaison/egress-cutover",
+    ],
+    [{ HOME: "/h", XDG_STATE_HOME: "/s", LIAISON_EGRESS_CUTOVER_FILE: "/m" }, "/m"],
+    [{}, "/.local/state/liaison/egress-cutover"],
+  ] as const) {
+    assert.equal(liaisonEgressCutoverFile(env), file, JSON.stringify(env));
+  }
+  // LIAISON_EGRESS_CUTOVER=1 is on and =0 is off whatever the marker; any other value
+  // leaves it to the marker.
+  for (const [forced, marker, on] of [
+    [undefined, false, false],
+    [undefined, true, true],
+    ["", true, true],
+    ["1", false, true],
+    ["0", true, false],
+    ["true", false, false],
+    [" 1", false, false],
+    ["false", true, true],
+  ] as const) {
+    const env = { HOME: "/h", ...(forced === undefined ? {} : { LIAISON_EGRESS_CUTOVER: forced }) };
+    const seen: string[] = [];
+    const exists = (file: string) => {
+      seen.push(file);
+      return marker;
+    };
+    assert.equal(isLiaisonEgressCutoverOn(env, exists), on, `${forced} ${marker}`);
+    if (forced === "1" || forced === "0") {
+      assert.deepEqual(seen, [], "a forced state does not look at the marker");
+    }
+  }
+  // The marker counts when it exists ([ -e ]): any file type, symlinks followed.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-egress-cutover-"));
+  t.after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  const marker = path.join(dir, "liaison", "egress-cutover");
+  const env = { HOME: "/nonexistent", XDG_STATE_HOME: dir };
+  assert.equal(isLiaisonEgressCutoverOn(env), false);
+  await fs.mkdir(path.dirname(marker));
+  await fs.symlink(path.join(dir, "absent"), marker);
+  assert.equal(isLiaisonEgressCutoverOn(env), false, "a dangling symlink is no marker");
+  await fs.rm(marker);
+  await fs.mkdir(marker);
+  assert.equal(isLiaisonEgressCutoverOn(env), true, "a directory marker counts");
+  await fs.rm(marker, { recursive: true });
+  await fs.writeFile(marker, "");
+  assert.equal(isLiaisonEgressCutoverOn(env), true);
+});
+
+test("before the egress cutover the settings may omit the egress hooks, never carry part of them", () => {
+  const isUsable = () => true;
+  const full = structuredClone(CLAUDE_SETTINGS_FIXTURE) as { hooks: Record<string, any> };
+  const other = {
+    PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/opt/guard.sh" }] }],
+  };
+  const half = structuredClone(full);
+  delete half.hooks.PostToolBatch;
+  const matcherOnly = {
+    hooks: {
+      PostToolUse: [{ matcher: "Bash", hooks: [full.hooks.PostToolUse[0].hooks[0]] }],
+    },
+  };
+  const blocking = structuredClone(full);
+  blocking.hooks.PostToolBatch[0].hooks[0].onFailure = "block";
+  const accepted = [{}, { hooks: {} }, { hooks: other }, { model: "x", hooks: other }, full];
+  const refused = [half, matcherOnly, blocking, { disableAllHooks: true }, { hooks: null }, []];
+  for (const settings of accepted) {
+    assert.deepEqual(
+      claudeEgressAdmissionViolations(settings, false, isUsable),
+      [],
+      JSON.stringify(settings),
+    );
+  }
+  for (const settings of refused) {
+    assert.notDeepEqual(
+      claudeEgressAdmissionViolations(settings, false, isUsable),
+      [],
+      JSON.stringify(settings),
+    );
+  }
+  // Once the cutover is on, the contract applies as it always did.
+  for (const settings of [...accepted, ...refused]) {
+    assert.deepEqual(
+      claudeEgressAdmissionViolations(settings, true, isUsable),
+      claudeEgressContractViolations(settings, false, isUsable),
+    );
+  }
+  assert.deepEqual(claudeEgressAdmissionViolations(full, true, isUsable), []);
+  assert.notDeepEqual(claudeEgressAdmissionViolations({}, true, isUsable), []);
+});
+
+// Cutover states as the agent environment and the marker express them.
+const CUTOVER_STATES = [
+  { name: "no marker", cutover: false, env: { LIAISON_EGRESS_CUTOVER: "" }, marker: false },
+  {
+    name: "forced off over a marker",
+    cutover: false,
+    env: { LIAISON_EGRESS_CUTOVER: "0" },
+    marker: true,
+  },
+  { name: "marker", cutover: true, env: { LIAISON_EGRESS_CUTOVER: "" }, marker: true },
+  { name: "forced on", cutover: true, env: { LIAISON_EGRESS_CUTOVER: "1" }, marker: false },
+] as const;
+
+for (const method of ["create", "load", "resume"] as const) {
+  test(`AcpClient ${method} requires the egress hooks only once the egress cutover is on`, async (t) => {
+    const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
+    const saved = await fs.readFile(settingsFile, "utf8");
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-egress-state-"));
+    t.after(async () => {
+      await fs.writeFile(settingsFile, saved);
+      await fs.rm(stateDir, { recursive: true, force: true });
+    });
+    const marker = path.join(stateDir, "liaison", "egress-cutover");
+    await fs.mkdir(path.dirname(marker));
+    setEnvForTest(t, { LIAISON_EGRESS_CUTOVER: "1", XDG_STATE_HOME: stateDir });
+    const withoutHooks = {
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/opt/guard.sh" }] }],
+      },
+      permissions: { deny: ["Read(./.env)"] },
+    };
+    const halfRendered = structuredClone(CLAUDE_SETTINGS_FIXTURE) as {
+      hooks: Record<string, unknown>;
+    };
+    delete halfRendered.hooks.SessionStart;
+    for (const state of CUTOVER_STATES) {
+      Object.assign(process.env, state.env);
+      await fs.rm(marker, { force: true });
+      if (state.marker) {
+        await fs.writeFile(marker, "");
+      }
+      for (const [settings, accepted] of [
+        [{}, !state.cutover],
+        [withoutHooks, !state.cutover],
+        [halfRendered, false],
+        [CLAUDE_SETTINGS_FIXTURE, true],
+      ] as const) {
+        await fs.writeFile(settingsFile, JSON.stringify(settings));
+        const label = `${state.name}: ${JSON.stringify(settings).slice(0, 60)}`;
+        const fixture = createClientFixture(t, {
+          client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+        });
+        const pending = openClaudeSessionIn(fixture, method);
+        if (!accepted) {
+          await assert.rejects(pending, (error: unknown) => {
+            assert(error instanceof ClaudeSettingsUnavailableError, label);
+            assert.match(error.message, /does not carry the egress hook contract/);
+            assert.match(error.message, /liaison acpx link --install/);
+            return true;
+          });
+          assert.equal(fixture.messages.length, 0, `no session request may be sent (${label})`);
+          continue;
+        }
+        const request = await fixture.message(0);
+        assert("method" in request && "params" in request, label);
+        assert.equal(request.method, `session/${method === "create" ? "new" : method}`, label);
+        const options = (
+          request.params as { _meta: { claudeCode: { options: Record<string, unknown> } } }
+        )._meta.claudeCode.options;
+        assert.deepEqual(options.settings, settings, label);
+        await fixture.reply(
+          request,
+          method === "create"
+            ? { sessionId: "session-meta", modes: DEFAULT_MODE_STATE }
+            : { modes: DEFAULT_MODE_STATE },
+        );
+        await pending;
+      }
+    }
+  });
+}
+
+test("AcpClient reads the egress cutover from the agent launch environment", async (t) => {
+  const settingsFile = path.join(scratchHome, ".acpx", "claude-settings.json");
+  const saved = await fs.readFile(settingsFile, "utf8");
+  t.after(async () => {
+    await fs.writeFile(settingsFile, saved);
+  });
+  await fs.writeFile(settingsFile, "{}");
+  const refused = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  await assert.rejects(refused.client.createSession(META_CWD), /egress hook contract/);
+  const staged = createClientFixture(t, {
+    client: { agentCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
+  });
+  (staged.client as unknown as { agentLaunchEnv?: NodeJS.ProcessEnv }).agentLaunchEnv = {
+    ...process.env,
+    LIAISON_EGRESS_CUTOVER: "0",
+  };
+  const pending = staged.track(staged.client.createSession(META_CWD));
+  const request = await staged.message(0);
+  assert("method" in request);
+  assert.equal(request.method, "session/new");
+  await staged.reply(request, { sessionId: "session-meta", modes: DEFAULT_MODE_STATE });
+  await pending;
+});
 
 function setEnvForTest(t: TestContext, values: Record<string, string>): void {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));

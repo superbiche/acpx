@@ -1,4 +1,4 @@
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 // Vendored copy of Liaison's declared Claude Code egress hook contract
@@ -7,7 +7,8 @@ import path from "node:path";
 // and never block (`onFailure: continue`); no prompt or compaction hook. Liaison derives
 // ~/.acpx/claude-settings.json with these hooks and checks it with
 // `liaison acpx link --check`; acpx validates the settings a Claude session loads
-// against this copy before creating, loading or resuming it. Both sides pin
+// against this copy before creating, loading or resuming it, and requires the hooks
+// only once the egress cutover is on (isLiaisonEgressCutoverOn). Both sides pin
 // CLAUDE_EGRESS_CONTRACT_DIGEST: change them together.
 export const CLAUDE_EGRESS_CONTRACT = {
   schema: "liaison-egress-claude-hooks/1",
@@ -136,6 +137,79 @@ function eventViolations(
     }
   }
   return found;
+}
+
+// The egress hooks are staged until the cutover: Liaison's hook wrapper
+// (liaison/egress/hooks/egress-hook) runs them only once it is on, and Liaison renders
+// none while it is off. Same resolution as the wrapper, byte for byte:
+// LIAISON_EGRESS_CUTOVER=1 is on, =0 is off, any other value leaves it to the marker
+// file ${LIAISON_EGRESS_CUTOVER_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/liaison/egress-cutover},
+// which counts when it exists.
+export const LIAISON_EGRESS_CUTOVER_ENV = "LIAISON_EGRESS_CUTOVER";
+export const LIAISON_EGRESS_CUTOVER_FILE_ENV = "LIAISON_EGRESS_CUTOVER_FILE";
+
+export function liaisonEgressCutoverFile(env: NodeJS.ProcessEnv): string {
+  const explicit = env[LIAISON_EGRESS_CUTOVER_FILE_ENV];
+  if (explicit) {
+    return explicit;
+  }
+  const state = env.XDG_STATE_HOME || `${env.HOME ?? ""}/.local/state`;
+  return `${state}/liaison/egress-cutover`;
+}
+
+export function isLiaisonEgressCutoverOn(
+  env: NodeJS.ProcessEnv,
+  exists: (file: string) => boolean = existsSync,
+): boolean {
+  const forced = env[LIAISON_EGRESS_CUTOVER_ENV];
+  if (forced === "1") {
+    return true;
+  }
+  if (forced === "0") {
+    return false;
+  }
+  return exists(liaisonEgressCutoverFile(env));
+}
+
+const CONTRACT_SCRIPTS: ReadonlySet<string> = new Set(
+  Object.values(CLAUDE_EGRESS_CONTRACT.events).map((rule) => rule.script),
+);
+
+// Whether any command hook, in any event or group, runs a contract script.
+function carriesEgressHook(hooks: Record<string, unknown>): boolean {
+  return Object.values(hooks).some(
+    (groups) =>
+      Array.isArray(groups) &&
+      groups.some(
+        (group) =>
+          isRecord(group) &&
+          Array.isArray(group.hooks) &&
+          group.hooks.some(
+            (hook) =>
+              isRecord(hook) &&
+              typeof hook.command === "string" &&
+              CONTRACT_SCRIPTS.has(path.basename(hook.command)),
+          ),
+      ),
+  );
+}
+
+// What a Claude session's settings must satisfy. Cutover on: the whole contract
+// (contains mode). Cutover off: no egress hook is required, but a file that carries
+// one carries the whole contract (no half-rendered file), and nothing disables hooks.
+export function claudeEgressAdmissionViolations(
+  settings: unknown,
+  cutover: boolean,
+  isUsable: CommandCheck = isExecutableFile,
+): string[] {
+  if (cutover || !isRecord(settings)) {
+    return claudeEgressContractViolations(settings, false, isUsable);
+  }
+  const hooks = settings.hooks;
+  if (hooks !== undefined && (!isRecord(hooks) || carriesEgressHook(hooks))) {
+    return claudeEgressContractViolations(settings, false, isUsable);
+  }
+  return claudeDisablingKeys(settings).map((key) => `${key} disables hooks`);
 }
 
 // Contract violations of parsed settings; empty when the egress hooks are in force.

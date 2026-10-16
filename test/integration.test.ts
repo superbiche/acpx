@@ -1508,6 +1508,7 @@ test("integration: built-in claude exec refuses to start without a valid setting
             "echo hello",
           ],
           homeDir,
+          { env: { LIAISON_EGRESS_CUTOVER: "1" } },
         );
         assert.notEqual(result.code, 0, "expected a refusal");
         assert.match(`${result.stderr}\n${result.stdout}`, reason);
@@ -1518,6 +1519,64 @@ test("integration: built-in claude exec refuses to start without a valid setting
           "no session may be created",
         );
       }
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+test("integration: built-in claude exec needs the egress hooks only once the cutover marker exists", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+    const claudeCompatibleAgentCommand = `${MOCK_AGENT_COMMAND} --claude-agent-acp`;
+    // A file as Liaison renders it before the cutover: the kept settings, no egress hook.
+    const staged = { permissions: { deny: ["Read(./.env)"] }, hooks: {} };
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    await fs.writeFile(path.join(homeDir, ".acpx", "claude-settings.json"), JSON.stringify(staged));
+    await fs.writeFile(path.join(homeDir, ".acpx", "claude-user-instructions.md"), "");
+    const stateHome = path.join(homeDir, "state");
+    const env = { LIAISON_EGRESS_CUTOVER: "", XDG_STATE_HOME: stateHome };
+    const exec = async () =>
+      await runCli(
+        [
+          "--agent",
+          claudeCompatibleAgentCommand,
+          "--approve-all",
+          "--cwd",
+          cwd,
+          "--format",
+          "json",
+          "exec",
+          "echo hello",
+        ],
+        homeDir,
+        { env },
+      );
+
+    try {
+      const before = await exec();
+      assert.equal(before.code, 0, before.stderr);
+      const created = parseJsonRpcOutputLines(before.stdout).find(
+        (payload) => payload.method === "session/new",
+      ) as
+        | { params?: { _meta?: { claudeCode?: { options?: { settings?: unknown } } } } }
+        | undefined;
+      assert(created, before.stdout);
+      assert.deepEqual(created.params?._meta?.claudeCode?.options?.settings, staged);
+
+      await fs.mkdir(path.join(stateHome, "liaison"), { recursive: true });
+      await fs.writeFile(path.join(stateHome, "liaison", "egress-cutover"), "");
+      const after = await exec();
+      assert.notEqual(after.code, 0, "expected a refusal once the cutover is on");
+      assert.match(
+        `${after.stderr}\n${after.stdout}`,
+        /Claude settings file does not carry the egress hook contract/,
+      );
+      assert.equal(
+        parseJsonRpcOutputLines(after.stdout).some((payload) => payload.method === "session/new"),
+        false,
+        "no session may be created",
+      );
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }

@@ -358,7 +358,8 @@ calls Claude Code would ask about:
 - it never loads the user settings; it gets `~/.acpx/claude-settings.json`,
   which `liaison acpx link --install` renders; acpx refuses the session when
   that file or the launch environment breaks the contract (for example a
-  missing file, a missing egress hook, or `permissions.allow` set);
+  missing file, a missing egress hook once the egress cutover is on, or
+  `permissions.allow` set);
 - repository `.claude` configuration and `.mcp.json` are not read; the
   session directory's `CLAUDE.md` and its imports still load; the user
   `CLAUDE.md`, flattened into `~/.acpx/claude-user-instructions.md`, is

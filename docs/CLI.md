@@ -739,8 +739,10 @@ Per-tool policy:
 Claude-family sessions never load Claude Code user settings: they pass
 `~/.acpx/claude-settings.json` to Claude Code as flag settings and refuse to
 start unless that file carries Liaison's egress hook contract with executable
-commands and sets neither `permissions.allow`, `permissions.defaultMode` nor a
-hook-disabling switch in `env`. `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`,
+commands (once the egress cutover is on: `LIAISON_EGRESS_CUTOVER=1`, or the
+Liaison marker file without `LIAISON_EGRESS_CUTOVER=0`) and sets neither
+`permissions.allow`, `permissions.defaultMode` nor a hook-disabling switch in
+`env`. `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`,
 `CLAUDE_CODE_SIMPLE` and `CLAUDE_CODE_SAFE_MODE` in the agent environment refuse
 the session, and acpx sets `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SAFE_MODE`,
 `CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_PLUGIN_DIRS` and

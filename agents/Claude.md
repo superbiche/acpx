@@ -22,16 +22,27 @@ resume.
 
 Claude-family sessions never load the user settings. They pass
 `~/.acpx/claude-settings.json` to Claude Code as flag settings;
-`liaison acpx link --install` renders it from the user settings. The file must
-carry the egress hooks of Liaison's declared hook contract (vendored in
-`src/acp/claude-egress-contract.ts`: PostToolUse, PostToolBatch and
-SessionStart, each with its script, timeout and failure policy `continue`,
-every command an absolute path to an executable file) among its other
-settings, and must not set `permissions.allow`,
-`permissions.defaultMode`, or in `env` any of the switches below or
-`ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable, not valid JSON, lacks
-a contract hook, or sets one of those keys, acpx refuses to create, load, or
-resume the session and sends no session request. acpx also refuses when the
+`liaison acpx link --install` renders it from the user settings. Once the
+egress cutover is on, the file must carry the egress hooks of Liaison's
+declared hook contract (vendored in `src/acp/claude-egress-contract.ts`:
+PostToolUse, PostToolBatch and SessionStart, each with its script, timeout and
+failure policy `continue`, every command an absolute path to an executable
+file) among its other settings. Before the cutover it may omit them, and
+Liaison renders none; a file that carries any of them must still carry the
+whole contract. In both states the file must not set `disableAllHooks`,
+`permissions.allow`, `permissions.defaultMode`, or in `env` any of the
+switches below or `ACPX_CLAUDE_PROJECT_DIR`. When it is missing, unreadable,
+not valid JSON, lacks a contract hook it requires, or sets one of those keys,
+acpx refuses to create, load, or resume the session and sends no session
+request.
+
+acpx reads the cutover state the way Liaison's hook wrapper
+(`liaison/egress/hooks/egress-hook`) does, in the agent environment:
+`LIAISON_EGRESS_CUTOVER=1` turns it on, `LIAISON_EGRESS_CUTOVER=0` turns it
+off, and otherwise it is on when the marker file
+`${LIAISON_EGRESS_CUTOVER_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/liaison/egress-cutover}`
+exists. Before the cutover the wrapper leaves the hooks inert, so requiring
+them would guard nothing. acpx also refuses when the
 agent's environment sets `ACPX_CLAUDE_INCLUDE_USER_SETTINGS`, or
 `CLAUDE_CODE_SIMPLE` or `CLAUDE_CODE_SAFE_MODE` (both stop Claude Code from
 running settings hooks).

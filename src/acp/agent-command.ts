@@ -5,9 +5,10 @@ import { ClaudeSettingsUnavailableError, CopilotAcpUnsupportedError } from "../e
 import { readWindowsEnvValue, resolveWindowsExecutablePath } from "../spawn-command-options.js";
 import { type AcpClientOptions } from "../types.js";
 import {
-  claudeEgressContractViolations,
+  claudeEgressAdmissionViolations,
   type CommandCheck,
   isExecutableFile,
+  isLiaisonEgressCutoverOn,
 } from "./claude-egress-contract.js";
 import { loadClaudeUserInstructions } from "./claude-user-instructions.js";
 import { loadClaudeUserPlugin } from "./claude-user-plugin.js";
@@ -378,8 +379,9 @@ export function buildClaudeCodeOptionsMeta(
 
 // Every Claude-family session runs with one settings file, ~/.acpx/claude-settings.json,
 // which carries the egress hooks of the declared contract
-// (src/acp/claude-egress-contract.ts). Any failure refuses the session before a
-// request is sent.
+// (src/acp/claude-egress-contract.ts) once the egress cutover is on, in the agent
+// environment the hooks inherit. Any failure refuses the session before a request is
+// sent.
 //
 // The acpx permission policy decides every tool call Claude Code would ask about:
 // - the managed tier makes Claude Code ignore allow rules from every other source
@@ -409,6 +411,7 @@ function assignClaudeCodeSettingIsolation(
   const settings = loadClaudeCodeSettingsFile(
     claudeCodeSettingsFilePath(context.home),
     context.isUsable,
+    isLiaisonEgressCutoverOn(env),
   );
   target.settings = settings;
   target.managedSettings = claudeManagedPermissionSettings(settings);
@@ -558,17 +561,22 @@ function forbiddenClaudeSettings(settings: Record<string, unknown>): string[] {
 }
 
 // Fail closed: a missing, unreadable or invalid file, one without the egress hook
-// contract (among its other settings) or one that carries allow rules, a default
-// permission mode or a hook-disabling environment switch refuses the session.
+// contract (among its other settings) while the cutover is on, one that carries only
+// part of it, or one that carries allow rules, a default permission mode or a
+// hook-disabling environment switch refuses the session.
 export function loadClaudeCodeSettingsFile(
   filePath: string = claudeCodeSettingsFilePath(),
   isUsable: CommandCheck = isExecutableFile,
+  cutover = true,
 ): Record<string, unknown> {
   const parsed = readSettingsJson(filePath, "Claude settings file");
-  const problems = claudeEgressContractViolations(parsed, false, isUsable);
+  const problems = claudeEgressAdmissionViolations(parsed, cutover, isUsable);
   if (problems.length > 0) {
+    const rule = cutover
+      ? "Claude-family sessions require it once the egress cutover is on"
+      : "before the egress cutover a file carries the whole contract or no egress hook";
     throw refuse(
-      `Claude settings file does not carry the egress hook contract: ${filePath}: ${problems.join("; ")}. Claude-family sessions require it; render it with \`liaison acpx link --install\``,
+      `Claude settings file does not carry the egress hook contract: ${filePath}: ${problems.join("; ")}. ${rule}; render it with \`liaison acpx link --install\``,
     );
   }
   const settings = parsed as Record<string, unknown>;
