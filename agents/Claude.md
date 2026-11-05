@@ -177,21 +177,25 @@ SDK's fallback `canUseTool` callback. Calls resolved earlier, including some
 read-only operations, need no callback or ACP permission request. See the
 [SDK permission evaluation order](https://code.claude.com/docs/en/agent-sdk/permissions#how-permissions-are-evaluated).
 
-Built-in Claude sessions retain project and local setting sources. The SDK
-documents that project skills can pre-approve tools through
-`allowed-tools`; such approvals can resolve a call before ACPX sees a request.
-See [skill tool grants](https://code.claude.com/docs/en/agent-sdk/skills#pre-approve-tools-for-skills).
+In this fork those earlier resolutions are closed off for Claude-family
+sessions, with the exceptions below; [Settings isolation](#settings-isolation)
+owns the details. Repository project and local setting sources are not loaded:
+Claude Code reads project configuration from the empty
+`~/.acpx/claude-project-config` directory, so repository settings, hooks,
+permission rules and skills cannot pre-approve a call. `--allowed-tools` and
+embedded `sessionOptions.allowedTools` are still forwarded, but the managed
+permission tier acpx passes (`allowManagedPermissionRulesOnly`) makes allow
+rules from every settings source and from `--allowed-tools` approve nothing;
+the settings file's deny and ask rules keep applying through that tier.
 
-For built-in Claude sessions, `--allowed-tools` and embedded
-`sessionOptions.allowedTools` are forwarded as native allow rules, not an
-exclusive tool list. They can pre-approve calls before ACPX's policies or
-permission mode are consulted.
-
-For checks that must cover every native tool call, the SDK recommends a trusted
-`PreToolUse` hook; a hook denial applies before automatic approvals. Configure
-that in the native Claude environment. ACPX's typed session options do not
-expose SDK hooks. Changing an ACPX permission mode alone does not establish that
-boundary. See [SDK permission controls](https://code.claude.com/docs/en/agent-sdk/permissions#allow-and-deny-rules)
+What can still resolve a call before acpx sees a request: read-only tools in
+Claude Code's `default` mode, grant keys in the delivered user plugin's skills
+and agents (see [skill tool grants](https://code.claude.com/docs/en/agent-sdk/skills#pre-approve-tools-for-skills)),
+and an administrator's managed settings on the machine, which make Claude Code
+ignore the tier acpx supplies. The SDK's trusted `PreToolUse` hook remains the
+native mechanism outside this fork's Claude-family contract; ACPX's typed
+session options do not expose SDK hooks. See
+[SDK permission controls](https://code.claude.com/docs/en/agent-sdk/permissions#allow-and-deny-rules)
 and [ACPX filesystem guardrails](../docs/permissions.md#working-directory-and-filesystem-guardrails).
 
 ## System prompt overrides

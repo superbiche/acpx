@@ -309,7 +309,7 @@ Behavior:
 - `--model <id>`: request an agent model during session creation; non-Claude agents must advertise a model config option or legacy `models` metadata
 - `--system-prompt <text>`: replace the agent system prompt. Forwarded to claude-agent-acp via ACP `_meta.systemPrompt`; persisted in `session_options.system_prompt` so reuse keeps the override. Other agents ignore the field.
 - `--append-system-prompt <text>`: append text to the agent system prompt. Forwarded to claude-agent-acp via ACP `_meta.systemPrompt.append`; same persistence rules as `--system-prompt`. Both system-prompt flags also apply to persistent and isolated ACP nodes in `flow run`.
-- `--allowed-tools <list>`: comma-separated tool list forwarded to the adapter; for Claude it pre-approves listed tools (`""` adds no approvals, rather than disabling tools)
+- `--allowed-tools <list>`: comma-separated tool list forwarded to the adapter; for Claude-family sessions in this fork it approves nothing by itself (managed permission tier; see Claude settings isolation below), for other agents it may pre-approve listed tools (`""` adds no approvals, rather than disabling tools)
 - `--max-turns <count>`: cap session turn count
 - `--prompt-retries <count>`: retry failed prompt turns on transient errors (default `0`); cancelling a queued turn stops remaining attempts, while already-received final responses keep their outcome
 - `--no-fs`: disable ACP filesystem callbacks so compatible agents use their native file operations. This is a protocol callback policy, not an OS sandbox for the agent's own filesystem access.
@@ -533,7 +533,7 @@ For ACP tool permission requests, per-tool policy takes precedence over the perm
 
 An `autoApprove` rule can approve a tool request under `--deny-all`. An `escalate` rule can prompt under `--approve-all` when stdin and stderr are TTYs. Without both TTYs, escalation denies or cancels the current request and adds `_meta.acpx.permissionEscalation` to the ACP response, even when `--non-interactive-permissions fail` is selected.
 
-For Claude, native approvals from `sessionOptions.allowedTools`, skill `allowed-tools`, and other settings can resolve calls before these ACP permission controls; see the [Claude approval boundary](../../agents/Claude.md#permission-approval-boundary) for native enforcement guidance.
+For Claude-family sessions in this fork, settings allow rules and `sessionOptions.allowedTools` approve nothing (managed permission tier); delivered user-plugin skill/agent grant keys and read-only tools in `default` mode can still resolve calls before these ACP permission controls; see [Claude settings isolation](#claude-settings-isolation) below and the [Claude approval boundary](../../agents/Claude.md#permission-approval-boundary).
 
 Per-tool policies govern `session/request_permission`. ACP filesystem and terminal operations use the client's permission mode separately; a tool approval does not bypass those operation checks.
 
