@@ -30,6 +30,7 @@ import type {
 import { type FlowRunStore, flowRunsBaseDir } from "../src/flows/store.js";
 import { listSessions } from "../src/session/persistence.js";
 import type { PromptInput } from "../src/types.js";
+import { writeClaudeEgressSettings } from "./claude-egress-test-helpers.js";
 
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 const MOCK_AGENT_COMMAND = `node ${JSON.stringify(MOCK_AGENT_PATH)}`;
@@ -2783,6 +2784,9 @@ for (const isolated of [false, true]) {
 
   test(`flow settings: ${isolated ? "isolated" : "persistent"} missing catalog and opaque option ids`, async () => {
     await withTempHome(async (home) => {
+      // The startup agent binary is named claude-agent-acp, i.e. Claude-family:
+      // the fork only starts it with the dedicated settings file in place.
+      await writeClaudeEgressSettings(home);
       const log = path.join(home, "requests.ndjson");
       const startupAgent = await writeFlowStartupModelAgent(home);
       const runner = new FlowRunner({
